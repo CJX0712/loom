@@ -139,24 +139,29 @@ CONSOLIDATE_MODEL = os.environ.get("LOOM_CONSOLIDATE_MODEL", "").strip() or None
 # 沉淀输出 token 上限。**必须封顶** —— 不封顶的话思考型模型会一路生成到上下文
 # 上限（qwen3:4b 是 4 万 token），一次"蒸馏只要一句话"的任务能跑几小时。
 #
-# 但也不能太小：**思考型模型的思维链和正文共用这个预算**。实测（qwen3:4b）：
-# 设 400 或 1024 时，模型把预算全用在"想"上，正文（content）直接是空字符串，
-# 一条事实都提不出来 —— 而这个模型一次简单任务的推理就有 2000+ token
-# （见 README 性能一节）。所以默认给到 3072：够装思维链 + 几条事实。
-CONSOLIDATE_MAX_TOKENS = int(os.environ.get("LOOM_CONSOLIDATE_MAX_TOKENS", "3072"))
+# 但也不能太小：**思考型模型的思维链和正文共用这个预算**。实测（qwen3:4b），
+# 设 400 / 1024 / 3072 跑下来，三次的 content **都是空字符串** —— 模型把预算
+# 全用在"想"上了，一条事实都提不出来。对"什么值得记"这种判断型任务，
+# 它的推理能轻松超过 3000 token。
+#
+# 所以默认给到 8192：一个几乎撞不到的天花板（防止失控），
+# 真正的边界交给下面的墙钟超时。
+CONSOLIDATE_MAX_TOKENS = int(os.environ.get("LOOM_CONSOLIDATE_MAX_TOKENS", "8192"))
 # 沉淀用低温：蒸馏是机械抽取，不需要创造性；温度高了小模型容易反复改口、
 # 越写越长（CPU 上这就是几分钟的差别）。
 CONSOLIDATE_TEMPERATURE = float(os.environ.get("LOOM_CONSOLIDATE_TEMPERATURE", "0.1"))
 # 沉淀的墙钟超时（秒）。超时就放弃这一轮，宁可少记一条也不让它挂着占 CPU。
 # 注意：HTTP 读超时救不了"慢慢吐 token"的场景（每读都有数据就不触发），
 # 所以这里必须自己加一层 asyncio 超时。
-# 这对数字要一起看：qwen3:4b 在 CPU 上约 4.5 tok/s，3072 token ≈ 680 秒。
-# 超时给 900 秒是留余量（真正先撞到的通常是 token 上限）。
+# **墙钟超时才是真正的边界**（token 上限只是防失控的天花板）：
+# 它一定会触发，不像 HTTP 读超时会被"慢慢吐 token"绕过。
 #
-# **慢是物理限制，不是 bug**：思考型模型在 CPU 上做一次沉淀就要 10 分钟量级。
-# 它跑在后台、有并发闸门（同时只允许一个）、可整体关闭，所以代价可控。
+# **慢是物理限制，不是 bug**：思考型模型在 CPU 上做一次沉淀就是 10–20 分钟量级
+# （qwen3:4b 约 4.5 tok/s，而它光推理就要几千 token）。代价之所以可控，是因为：
+#   1) 跑在后台，不阻塞对话；2) 同一时刻只允许一个，忙时直接跳过而非排队
+#      —— 连续对话时这天然把频率压到"每十几分钟最多一次"；3) 可以整体关掉。
 # 想要秒级沉淀，装一个不思考的小模型并设 LOOM_CONSOLIDATE_MODEL。
-CONSOLIDATE_TIMEOUT = float(os.environ.get("LOOM_CONSOLIDATE_TIMEOUT", "900"))
+CONSOLIDATE_TIMEOUT = float(os.environ.get("LOOM_CONSOLIDATE_TIMEOUT", "1200"))
 
 # --- MCP（Model Context Protocol）-------------------------------------------
 MCP_CONFIG = Path(
