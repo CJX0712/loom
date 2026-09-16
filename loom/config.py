@@ -109,6 +109,8 @@ EMBED_MODEL = os.environ.get("LOOM_EMBED_MODEL", "nomic-embed-text")
 # 文本切块：每块约多少字符，相邻块重叠多少（重叠防止一句话被切在两半）
 RAG_CHUNK_SIZE = int(os.environ.get("LOOM_RAG_CHUNK_SIZE", "800"))
 RAG_CHUNK_OVERLAP = int(os.environ.get("LOOM_RAG_CHUNK_OVERLAP", "150"))
+# 语义记忆召回条数（长期记忆用 embedding 找回含义相近的事实）
+MEMORY_RECALL_K = int(os.environ.get("LOOM_MEMORY_RECALL_K", "8"))
 
 # --- MCP（Model Context Protocol）-------------------------------------------
 MCP_CONFIG = Path(
@@ -143,4 +145,5 @@ def describe() -> dict:
         "embed_model": EMBED_MODEL,
         "rag_chunk_size": RAG_CHUNK_SIZE,
         "rag_chunk_overlap": RAG_CHUNK_OVERLAP,
+        "memory_recall_k": MEMORY_RECALL_K,
     }

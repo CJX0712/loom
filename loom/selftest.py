@@ -316,6 +316,47 @@ def run() -> Results:
         r.extend(asyncio.run(memory_checks()))
         add(r, "[记忆] 计数与写入一致", store.count_facts() == 1, str(store.count_facts()))
 
+        # --- 9b. 语义记忆（FakeEmbeddings，离线、确定性）---------------------
+        fake_emb = FakeEmbeddings(dim=64)
+        sem_store = Store(tmp / "sem.sqlite3")
+        sem_reg = Registry()
+        register_memory(sem_reg, sem_store, "s2", backend=fake_emb)
+
+        async def semantic_checks() -> Results:
+            out: Results = []
+            await sem_reg.dispatch("memory_save",
+                {"text": "猫咪喜欢吃鱼，也爱抓沙发", "tags": "宠物"})
+            await sem_reg.dispatch("memory_save",
+                {"text": "Python 是用缩进表示代码块的语言", "tags": "编程"})
+            rec = await sem_reg.dispatch("memory_recall", {"query": "猫 宠物 吃什么"})
+            add(out, "[语义记忆] 召回命中语义相近的猫事实",
+                rec["ok"] and "猫咪" in rec["content"], rec.get("content", "")[:90])
+            rec2 = await sem_reg.dispatch("memory_recall", {"query": "怎么写代码 缩进"})
+            add(out, "[语义记忆] 召回命中语义相近的编程事实",
+                rec2["ok"] and "Python" in rec2["content"], rec2.get("content", "")[:90])
+            add(out, "[语义记忆] 召回结果带 (0,1] 相似度分数",
+                rec["ok"] and "score" in rec["content"])
+            kw = await sem_reg.dispatch("memory_search", {"query": "Python"})
+            add(out, "[语义记忆] 关键词检索仍可用（精确匹配）",
+                kw["ok"] and "Python" in kw["content"], kw.get("content", "")[:90])
+            return out
+
+        r.extend(asyncio.run(semantic_checks()))
+
+        # 无嵌入后端时：recall 优雅报错、save 仍工作（降级路径）
+        no_emb = Registry()
+        register_memory(no_emb, Store(tmp / "noemb.sqlite3"), "s3")
+        async def no_backend_checks() -> Results:
+            out: Results = []
+            res = await no_emb.dispatch("memory_recall", {"query": "x"})
+            add(out, "[语义记忆] 无后端时 recall 优雅报配置错误（不崩）",
+                (not res["ok"]) and res["meta"].get("kind") == "config", str(res["meta"]))
+            sv = await no_emb.dispatch("memory_save", {"text": "仍可记关键词事实"})
+            add(out, "[语义记忆] 无后端时仍能写入（降级）",
+                sv["ok"] and sv["meta"].get("id", 0) > 0)
+            return out
+        r.extend(asyncio.run(no_backend_checks()))
+
         # 会话隔离
         a = store.create_session("A")
         b = store.create_session("B")

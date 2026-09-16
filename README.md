@@ -55,6 +55,26 @@ python -m loom rag search "如何重启服务"  # 语义检索最相关片段
 
 ---
 
+## 长期记忆 —— 语义召回（MemGPT 思路，本地化）
+
+Loom 的长期记忆不止于关键词。每当你（或智能体）用 `memory_save` 写下一条事实，Loom 会
+**同时用同一个 `nomic-embed-text` 嵌入**它，存进 SQLite 的 `fact_embeddings` 表。之后用
+`memory_recall` 提问时，问题被嵌入、和所有记忆算余弦，找回**含义最相近**的事实——而不是字面
+匹配。这和 Letta/MemGPT 的语义记忆是同一思路，但零额外依赖、全程不联网。
+
+```bash
+# 智能体在对话中自动用这些工具（无需你手动）：
+memory_save   "用户是前端工程师，偏好 React Hooks"   # 写入 + 同步生成向量
+memory_recall "他写过什么前端框架"                     # 语义召回，命中上面的事实
+memory_search "React"                                 # 关键词精确检索（兜底）
+```
+
+- 嵌入失败（如模型没拉）时**优雅降级**：事实照样记下来，只是暂时不能被语义召回，绝不丢数据。
+- 未配置嵌入后端时 `memory_recall` 会明确报错、不崩溃。
+- 记忆存在 `LOOM_STATE/loom.sqlite3`，跨会话持久。
+
+---
+
 ## 快速开始
 
 ```bash

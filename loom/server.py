@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
     store = Store(config.DB_PATH)
     hub = MCPHub()
     backend = OllamaBackend()
+    embed = OllamaEmbeddings()  # 记忆语义召回 + RAG 共用一个嵌入后端
 
     STATE.update(
         registry=registry,
@@ -104,6 +105,7 @@ async def health() -> dict:
         "tool_sources": sorted({t.source for t in registry.all()}),
         "mcp": hub.summary(),
         "memory_facts": STATE["store"].count_facts(),
+        "memory_semantic": config.EMBED_MODEL,
         "sessions": len(STATE["store"].list_sessions(limit=1000)),
         "rag": {
             "chunks": STATE["rag"].count(),

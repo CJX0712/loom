@@ -15,6 +15,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import config
+from .rag import EmbeddingBackend, cosine
 from .tools import Registry, Tool, fail, ok
 
 SCHEMA = """
@@ -41,6 +43,10 @@ CREATE TABLE IF NOT EXISTS facts (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_facts_text ON facts(text);
+CREATE TABLE IF NOT EXISTS fact_embeddings (
+    fact_id     INTEGER PRIMARY KEY,
+    embedding   TEXT NOT NULL
+);
 """
 
 _WORD_RX = re.compile(r"[\w\u4e00-\u9fff]+")
@@ -148,14 +154,40 @@ class Store:
         return [json.loads(r["payload"]) for r in rows]
 
     # -- 长期记忆 ---------------------------------------------------------
-    def save_fact(self, text: str, tags: str = "", session_id: str | None = None) -> int:
+    def save_fact(self, text: str, tags: str = "", session_id: str | None = None,
+                  vec: list[float] | None = None) -> int:
+        text = text.strip()
         with self._lock:
             cur = self._db.execute(
                 "INSERT INTO facts(text,tags,session_id,created_at) VALUES(?,?,?,?)",
-                (text.strip(), tags.strip(), session_id, time.time()),
+                (text, tags.strip(), session_id, time.time()),
             )
+            fid = int(cur.lastrowid)
+            if vec is not None:
+                self._db.execute(
+                    "INSERT INTO fact_embeddings(fact_id,embedding) VALUES(?,?)",
+                    (fid, json.dumps([float(x) for x in vec])),
+                )
             self._db.commit()
-        return int(cur.lastrowid)
+        return fid
+
+    def recall_facts(self, vec: list[float], k: int = 8) -> list[dict]:
+        """语义召回：和所有带向量的事实算余弦，返回最相似的 k 条（0 向量返回空）。"""
+        if not vec:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT f.id, f.text, f.tags, f.created_at, fe.embedding"
+                " FROM facts f JOIN fact_embeddings fe ON fe.fact_id=f.id"
+                " ORDER BY f.id DESC LIMIT 5000"
+            ).fetchall()
+        scored: list[tuple[float, dict]] = []
+        for r in rows:
+            s = cosine(json.loads(r["embedding"]), vec)
+            if s > 0:
+                scored.append((s, dict(r)))
+        scored.sort(key=lambda x: (-x[0], -x[1]["id"]))
+        return [dict(r, score=round(s, 4)) for s, r in scored[:k]]
 
     def search_facts(self, query: str, limit: int = 8) -> list[dict]:
         q = _tokens(query)
@@ -180,19 +212,47 @@ class Store:
             return int(self._db.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
 
 
-def memory_tools(store: Store, session_id: str | None = None) -> list[Tool]:
-    """把长期记忆暴露成两个工具，注册进 Registry 后模型就能自己记事情了。"""
+def memory_tools(store: Store, session_id: str | None = None,
+                 backend: EmbeddingBackend | None = None) -> list[Tool]:
+    """把长期记忆暴露成工具，注册进 Registry 后模型就能自己记、自己回想了。
+
+    `backend` 提供嵌入能力时：保存事实会同步生成向量，`memory_recall` 做语义召回；
+    不提供时降级为纯关键词记忆（recall 优雅报错，save 照常工作）。
+    """
 
     async def memory_save(text: str, tags: str = "") -> dict:
         if not (text or "").strip():
             return fail("text 不能为空")
-        fid = store.save_fact(text, tags, session_id)
+        vec = None
+        if backend is not None:
+            try:
+                vec = (await backend.embed([text.strip()]))[0]
+            except Exception:
+                vec = None  # 嵌入失败也不耽误记忆，只是这条不能被语义召回
+        fid = store.save_fact(text, tags, session_id, vec=vec)
         return ok(f"已记住 #{fid}：{text.strip()[:120]}", id=fid)
 
     async def memory_search(query: str, limit: int = 8) -> dict:
         hits = store.search_facts(query, int(limit))
         if not hits:
             return ok("没有相关记忆。", hits=0)
+        body = "\n".join(
+            f"- #{h['id']} (score {h['score']}) {h['text']}" for h in hits
+        )
+        return ok(body, hits=len(hits))
+
+    async def memory_recall(query: str, limit: int = config.MEMORY_RECALL_K) -> dict:
+        if backend is None:
+            return fail("语义召回未启用（无嵌入后端）", kind="config")
+        try:
+            qv = (await backend.embed([query]))[0]
+        except Exception as exc:
+            return fail(
+                f"召回失败（嵌入模型可能未就绪，先 ollama pull {config.EMBED_MODEL}）: "
+                f"{type(exc).__name__}: {exc}", kind="embed")
+        hits = store.recall_facts(qv, int(limit))
+        if not hits:
+            return ok("没有可语义召回的记忆。", hits=0)
         body = "\n".join(
             f"- #{h['id']} (score {h['score']}) {h['text']}" for h in hits
         )
@@ -211,7 +271,7 @@ def memory_tools(store: Store, session_id: str | None = None) -> list[Tool]:
         ),
         Tool(
             "memory_search",
-            "在自己的长期记忆里按关键词检索。回答涉及用户偏好或历史事实前先查一下。",
+            "在自己的长期记忆里按关键词检索（字面匹配）。回答涉及用户偏好或历史事实前先查一下。",
             {"type": "object", "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "description": "返回条数，默认 8"}},
@@ -219,11 +279,23 @@ def memory_tools(store: Store, session_id: str | None = None) -> list[Tool]:
             memory_search,
             tags=["memory"],
         ),
+        Tool(
+            "memory_recall",
+            "在语义层面召回长期记忆：把问题嵌入后，找回含义最相近的事实（而非字面匹配）。"
+            "回答涉及用户偏好、历史结论或跨会话上下文前，优先用这个。",
+            {"type": "object", "properties": {
+                "query": {"type": "string", "description": "自然语言问题"},
+                "limit": {"type": "integer", "description": "返回条数，默认 8"}},
+             "required": ["query"]},
+            memory_recall,
+            tags=["memory"],
+        ),
     ]
 
 
-def register_memory(reg: Registry, store: Store, session_id: str | None = None) -> None:
-    for t in memory_tools(store, session_id):
+def register_memory(reg: Registry, store: Store, session_id: str | None = None,
+                    backend: EmbeddingBackend | None = None) -> None:
+    for t in memory_tools(store, session_id, backend):
         if reg.get(t.name) is None:
             reg.register(t)
 

@@ -105,8 +105,9 @@ class FakeEmbeddings:
 
     def _vec(self, text: str) -> list[float]:
         v = [0.0] * self.dim
-        # 中英文混合分词：英文按词，中文按字
-        for tok in re.findall(r"[\w一-鿿]+", (text or "").lower()):
+        # 中英文混合分词：英文/数字按词，中文**逐字**（这样"猫"和"猫咪"能共享字符，
+        # 余弦才有意义；否则整串中文被当成一个 token，语义检索彻底失效）。
+        for tok in re.findall(r"[a-z0-9_]+|[一-鿿]", (text or "").lower()):
             idx = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16) % self.dim
             v[idx] += 1.0
         norm = math.sqrt(sum(x * x for x in v))
