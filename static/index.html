@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loom · 本地智能体</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel-2:#1c2128; --line:#30363d;
+  --fg:#e6edf3; --fg-dim:#8b949e; --fg-faint:#6e7681;
+  --accent:#58a6ff; --ok:#3fb950; --bad:#f85149; --warn:#d29922;
+  --tool:#bc8cff; --think:#8b949e;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --radius:10px;
+}
+html[data-theme="light"]{
+  --bg:#ffffff; --panel:#f6f8fa; --panel-2:#eef1f4; --line:#d0d7de;
+  --fg:#1f2328; --fg-dim:#59636e; --fg-faint:#818b98;
+  --accent:#0969da; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700;
+  --tool:#8250df; --think:#6e7781;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);
+  font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;
+  display:grid;grid-template-rows:auto 1fr auto;height:100vh;overflow:hidden;
+}
+button{font-family:inherit;font-size:13px;cursor:pointer;border-radius:6px;
+  border:1px solid var(--line);background:var(--panel-2);color:var(--fg);
+  padding:5px 11px;transition:.12s}
+button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover:not(:disabled){filter:brightness(1.12);color:#fff}
+button.danger{border-color:var(--bad);color:var(--bad)}
+
+/* ── 顶栏 ── */
+header{display:flex;align-items:center;gap:10px;padding:9px 14px;
+  border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.logo{font-weight:700;letter-spacing:-.3px;font-size:15px}
+.logo b{color:var(--accent)}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;
+  padding:3px 9px;border-radius:999px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--fg-dim);white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--fg-faint);flex:0 0 auto}
+.dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.dot.off{background:var(--bad)}
+
+/* ── 主体 ── */
+main{display:grid;grid-template-columns:236px 1fr 288px;min-height:0}
+@media(max-width:1080px){main{grid-template-columns:200px 1fr}
+  #side-right{display:none}}
+@media(max-width:720px){main{grid-template-columns:1fr}
+  #side-left{display:none}}
+aside{min-height:0;overflow-y:auto;background:var(--panel);font-size:13px}
+#side-left{border-right:1px solid var(--line)}
+#side-right{border-left:1px solid var(--line)}
+.side-head{padding:9px 12px;font-size:11px;text-transform:uppercase;
+  letter-spacing:.07em;color:var(--fg-faint);position:sticky;top:0;
+  background:var(--panel);border-bottom:1px solid var(--line);z-index:2;
+  display:flex;align-items:center;justify-content:space-between;gap:6px}
+.sess{padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;
+  display:flex;flex-direction:column;gap:2px}
+.sess:hover{background:var(--panel-2)}
+.sess.active{background:var(--panel-2);box-shadow:inset 2px 0 0 var(--accent)}
+.sess .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess .m{font-size:11px;color:var(--fg-faint)}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:5px 12px;
+  border-bottom:1px solid var(--line)}
+.kv span:first-child{color:var(--fg-faint)}
+.kv span:last-child{text-align:right;word-break:break-all}
+.toolrow{padding:5px 12px;border-bottom:1px solid var(--line);display:flex;
+  gap:7px;align-items:baseline}
+.toolrow code{font-family:var(--mono);font-size:11.5px;color:var(--tool)}
+
+/* ── 对话区 ── */
+#chat{min-height:0;overflow-y:auto;padding:20px 26px;scroll-behavior:smooth}
+.wrap{max-width:900px;margin:0 auto}
+.turn{margin-bottom:22px}
+.role{font-size:11px;text-transform:uppercase;letter-spacing:.07em;
+  color:var(--fg-faint);margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.role .t{color:var(--fg-faint);text-transform:none;letter-spacing:0;font-weight:400}
+.user .body{background:var(--panel-2);border:1px solid var(--line);
+  border-radius:var(--radius);padding:10px 14px;white-space:pre-wrap;
+  word-break:break-word}
+.body{word-break:break-word}
+.body p{margin:0 0 9px}
+.body p:last-child{margin-bottom:0}
+.body pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:11px 13px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;
+  margin:9px 0}
+.body code{font-family:var(--mono);font-size:12.5px;background:var(--panel-2);
+  border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.body pre code{background:none;border:none;padding:0}
+.body ul{margin:6px 0;padding-left:20px}
+.body li{margin:2px 0}
+.body a{color:var(--accent)}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--accent);
+  vertical-align:-2px;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* 工具卡 */
+.tool{border:1px solid var(--line);border-radius:9px;margin:9px 0;
+  background:var(--panel);overflow:hidden}
+.tool summary{padding:8px 12px;cursor:pointer;display:flex;align-items:center;
+  gap:9px;list-style:none;font-size:13px}
+.tool summary::-webkit-details-marker{display:none}
+.tool summary:hover{background:var(--panel-2)}
+.tool .nm{font-family:var(--mono);color:var(--tool);font-weight:600}
+.tool .ms{color:var(--fg-faint);font-size:11.5px;margin-left:auto}
+.tool .args{padding:0 12px 10px;font-family:var(--mono);font-size:12px;
+  color:var(--fg-dim);white-space:pre-wrap;word-break:break-all}
+.tool .out{margin:0;padding:10px 12px;border-top:1px solid var(--line);
+  background:var(--panel-2);font-family:var(--mono);font-size:12px;
+  white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
+.badge{font-size:11px;padding:1px 7px;border-radius:999px;font-weight:600}
+.badge.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
+.badge.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 15%,transparent)}
+.think{border:1px solid var(--line);border-radius:8px;margin:8px 0;
+  background:var(--panel);overflow:hidden}
+.think>summary{padding:5px 11px;cursor:pointer;font-size:12px;
+  color:var(--think);list-style:none;display:flex;align-items:center;gap:6px}
+.think>summary::-webkit-details-marker{display:none}
+.think>summary::before{content:"▸";font-size:10px;transition:.15s}
+.think[open]>summary::before{transform:rotate(90deg)}
+.think>summary:hover{background:var(--panel-2)}
+.think .tb{padding:4px 12px 10px;font-size:12.5px;color:var(--think);
+  white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;
+  border-top:1px solid var(--line)}
+.step{font-size:11px;color:var(--fg-faint);letter-spacing:.06em;
+  margin:14px 0 6px;display:flex;align-items:center;gap:9px}
+.step::after{content:"";flex:1;height:1px;background:var(--line)}
+.note{border:1px solid var(--line);border-left:3px solid var(--warn);
+  border-radius:7px;padding:8px 12px;font-size:12.5px;color:var(--fg-dim);
+  background:var(--panel);margin:10px 0}
+.note.err{border-left-color:var(--bad);color:var(--bad)}
+.empty{color:var(--fg-faint);text-align:center;padding:56px 20px;font-size:13.5px}
+.empty kbd{font-family:var(--mono);font-size:11.5px;border:1px solid var(--line);
+  border-radius:4px;padding:1px 5px;background:var(--panel)}
+.hints{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:16px}
+.hints button{font-size:12.5px}
+
+/* ── 输入区 ── */
+footer{border-top:1px solid var(--line);background:var(--panel);padding:11px 26px 13px}
+.composer{max-width:900px;margin:0 auto;display:flex;gap:9px;align-items:flex-end}
+textarea{flex:1;resize:none;min-height:44px;max-height:190px;padding:11px 13px;
+  border-radius:var(--radius);border:1px solid var(--line);background:var(--panel-2);
+  color:var(--fg);font-family:inherit;font-size:14px;line-height:1.5;outline:none}
+textarea:focus{border-color:var(--accent)}
+.footmeta{max-width:900px;margin:7px auto 0;font-size:11.5px;color:var(--fg-faint);
+  display:flex;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Loom<b>.</b></div>
+  <span class="pill"><span class="dot" id="d-ollama"></span><span id="p-model">…</span></span>
+  <span class="pill" id="p-tools">工具 …</span>
+  <span class="pill" id="p-mcp">MCP …</span>
+  <div class="spacer"></div>
+  <button id="btn-steps" title="每轮最多几步">步骤 ×8</button>
+  <button id="btn-theme" title="切换主题">◐</button>
+  <button id="btn-health" title="刷新状态">↻</button>
+</header>
+
+<main>
+  <aside id="side-left">
+    <div class="side-head"><span>会话</span>
+      <button id="btn-new" style="padding:2px 8px;font-size:12px">+ 新建</button></div>
+    <div id="sessions"></div>
+  </aside>
+
+  <div id="chat">
+    <div class="wrap" id="transcript">
+      <div class="empty" id="empty">
+        <div style="font-size:15px;color:var(--fg);margin-bottom:8px">本地智能体已就绪</div>
+        <div>推理在你自己的机器上跑，工具真的会去执行。</div>
+        <div class="hints">
+          <button data-q="看看当前目录里有什么，用一句话说明这个项目是干什么的。">探查当前目录</button>
+          <button data-q="用 python_run 算出 2 的 32 次方，再告诉我结果。">算个数</button>
+          <button data-q="抓取 https://example.com 并总结成三点。">抓个网页</button>
+          <button data-q="列出你现在能用的所有工具，按用途分组说明。">列工具</button>
+        </div>
+        <div style="margin-top:18px;font-size:12px">Enter 发送 · Shift+Enter 换行</div>
+      </div>
+    </div>
+  </div>
+
+  <aside id="side-right">
+    <div class="side-head"><span>运行状态</span></div>
+    <div id="health"></div>
+    <div class="side-head" style="top:auto;position:static"><span>工具清单</span></div>
+    <div id="tools"></div>
+  </aside>
+</main>
+
+<footer>
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="交给它做点什么…"></textarea>
+    <button class="primary" id="btn-send">发送</button>
+    <button id="btn-stop" disabled>停止</button>
+  </div>
+  <div class="footmeta">
+    <span id="foot-status">就绪</span>
+    <span id="foot-usage"></span>
+    <span style="margin-left:auto">全离线 · 零 API Key</span>
+  </div>
+</footer>
+
+<script>
+"use strict";
+/* ── 主题 ───────────────────────────────────────────────────────────── */
+const html = document.documentElement;
+const savedTheme = localStorage.getItem("loom.theme");
+if (savedTheme) html.dataset.theme = savedTheme;
+else html.dataset.theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+document.getElementById("btn-theme").onclick = () => {
+  const next = html.dataset.theme === "light" ? "dark" : "light";
+  html.dataset.theme = next; localStorage.setItem("loom.theme", next);
+};
+
+/* ── 转义与小渲染器 ──────────────────────────────────────────────────── */
+function esc(s){
+  return String(s ?? "").replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+/* 先整体转义，再做极有限的 markdown 变换 —— 顺序不能反，否则就是 XSS。 */
+function render(text){
+  const blocks = [];
+  let s = esc(text).replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push('<pre><code>' + code.replace(/\n$/,"") + '</code></pre>');
+    return "\u0000B" + (blocks.length - 1) + "\u0000";
+  });
+  s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/^\s*[-*]\s+(.+)$/gm, "<li>$1</li>");
+  s = s.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, "<ul>$1</ul>");
+  s = s.split(/\n{2,}/).map(p =>
+      /^\s*(<ul>|<pre>|\u0000B)/.test(p) ? p : "<p>" + p.replace(/\n/g,"<br>") + "</p>"
+    ).join("");
+  return s.replace(/\u0000B(\d+)\u0000/g, (_, i) => blocks[+i]);
+}
+
+/* ── 状态 ───────────────────────────────────────────────────────────── */
+const S = { session: null, model: null, busy: false, steps: 8, ctrl: null,
+            usage: {pt:0, ct:0} };
+const $ = id => document.getElementById(id);
+const chat = $("chat"), transcript = $("transcript");
+/* 空状态模板在启动时留一份副本：一旦 transcript 被清空，原节点就没了，
+   后续想"恢复空状态"必须靠这份 HTML，而不是再去 DOM 里找。 */
+const EMPTY_HTML = $("empty").outerHTML;
+const setFoot = t => { $("foot-status").textContent = t; };
+
+/* ── 健康检查 ────────────────────────────────────────────────────────── */
+async function refreshHealth(){
+  try{
+    const h = await (await fetch("/api/health")).json();
+    S.model = h.model;
+    $("d-ollama").className = "dot " + (h.ollama.up ? "on" : "off");
+    $("p-model").textContent = h.model || (h.ollama.up ? "无模型" : "Ollama 离线");
+    $("p-tools").textContent = "工具 " + h.tools;
+    const mcp = h.mcp || {};
+    $("p-mcp").textContent = mcp.configured
+      ? `MCP ${mcp.alive_servers}/${mcp.configured} · ${mcp.tools} 工具`
+      : "MCP 未配置";
+    $("p-mcp").title = (mcp.servers || []).map(s =>
+      `${s.name}: ${s.alive ? "ok" : (s.error || "未启动")}`).join("\n") || "在 mcp/servers.json 里配置服务器";
+
+    const rows = [
+      ["服务", h.ok ? "● 就绪" : "● 降级"],
+      ["模型", h.model || "—"],
+      ["Ollama", h.ollama.up ? "● 在线" : "● 离线"],
+      ["工作区", h.config.workdir],
+      ["上限步数", h.config.max_steps],
+      ["shell", h.config.shell_enabled ? "开启" : "关闭"],
+      ["抓取", h.config.crawl4ai || "内置"],
+      ["长期记忆", h.memory_facts + " 条"],
+      ["会话数", h.sessions],
+      ["已运行", h.uptime_s + "s"],
+    ];
+    $("health").innerHTML = rows.map(([k,v]) =>
+      `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join("");
+    if (h.model_error)
+      $("health").innerHTML += `<div class="note err">${esc(h.model_error)}</div>`;
+
+    const t = await (await fetch("/api/tools")).json();
+    $("tools").innerHTML = t.tools.map(x =>
+      `<div class="toolrow"><code>${esc(x.name)}</code>
+       <span style="color:var(--fg-faint);font-size:11px">${esc(x.source)}</span></div>`).join("");
+  }catch(e){ setFoot("状态获取失败: " + e.message); }
+}
+
+/* ── 会话列表 ────────────────────────────────────────────────────────── */
+async function refreshSessions(){
+  const d = await (await fetch("/api/sessions")).json();
+  $("sessions").innerHTML = d.sessions.map(s =>
+    `<div class="sess ${s.id === S.session ? "active" : ""}" data-id="${s.id}">
+       <div class="t">${esc(s.title || "(无标题)")}</div>
+       <div class="m">${new Date(s.updated_at*1000).toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})} · ${s.n} 条</div>
+     </div>`).join("") || '<div class="kv"><span>还没有会话</span><span></span></div>';
+  $("sessions").querySelectorAll(".sess").forEach(el => el.onclick = () => openSession(el.dataset.id));
+}
+
+async function openSession(id){
+  if (S.busy) return;
+  S.session = id;
+  const d = await (await fetch("/api/sessions/" + id)).json();
+  transcript.innerHTML = "";
+  hideEmpty();
+  let buf = null;
+  for (const m of d.messages){
+    if (m.role === "system") continue;
+    if (m.role === "user"){ addUser(m.content); buf = null; }
+    else if (m.role === "assistant"){
+      buf = addAssistant();
+      if (m.content) buf.body.innerHTML = render(m.content);
+      if (m.tool_calls) for (const tc of m.tool_calls)
+        buf.tools.appendChild(toolCard(tc.function.name, tc.function.arguments, null));
+    } else if (m.role === "tool" && buf){
+      const pending = buf.tools.querySelector("details.tool:not([data-done])");
+      let payload = {};
+      try { payload = JSON.parse(m.content); } catch(e){ payload = {content: m.content}; }
+      if (pending){
+        pending.dataset.done = "1";
+        fillTool(pending, payload.ok, payload.content, payload.meta);
+      }
+    }
+  }
+  refreshSessions(); scroll();
+}
+
+/* 空状态提示是个一次性节点：任何一次写入 transcript 之前都要先安全地隐藏它，
+   否则清空后再去取 #empty 会拿到 null，`.style` 直接抛异常、整个渲染中断。 */
+function hideEmpty(){
+  const el = document.getElementById("empty");
+  if (el) el.style.display = "none";
+}
+
+/* ── 渲染 ────────────────────────────────────────────────────────────── */
+function scroll(){ chat.scrollTop = chat.scrollHeight; }
+
+function addUser(text){
+  hideEmpty();
+  const el = document.createElement("div");
+  el.className = "turn user";
+  el.innerHTML = `<div class="role">你</div><div class="body"></div>`;
+  el.querySelector(".body").textContent = text;
+  transcript.appendChild(el); scroll(); return el;
+}
+
+function addAssistant(){
+  const el = document.createElement("div");
+  el.className = "turn assis";
+  el.innerHTML = `<div class="role">Loom <span class="t"></span></div>
+                  <div class="tools"></div><div class="body"></div>`;
+  transcript.appendChild(el);
+  return { root: el, body: el.querySelector(".body"),
+           tools: el.querySelector(".tools"), meta: el.querySelector(".t"),
+           raw: "", thinkEl: null };
+}
+
+function addStep(n, max){
+  const d = document.createElement("div");
+  d.className = "step"; d.textContent = `第 ${n} / ${max} 步`;
+  transcript.appendChild(d); scroll();
+}
+
+function toolCard(name, args, ok){
+  const d = document.createElement("details");
+  d.className = "tool"; d.open = true;
+  const badge = ok === null ? '<span class="badge" style="color:var(--fg-faint)">运行中</span>'
+    : ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad">失败</span>';
+  let pretty = args;
+  try { pretty = JSON.stringify(typeof args === "string" ? JSON.parse(args) : args, null, 2); } catch(e){}
+  d.innerHTML = `<summary>${badge}<span class="nm">${esc(name)}</span>
+                   <span class="ms">…</span></summary>
+                 <div class="args"><b>入参</b>\n${esc(pretty)}</div>
+                 <pre class="out">执行中…</pre>`;
+  return d;
+}
+
+function fillTool(el, ok, content, meta){
+  const badge = el.querySelector("summary .badge");
+  badge.className = "badge " + (ok ? "ok" : "bad");
+  badge.textContent = ok ? "成功" : "失败";
+  el.querySelector(".ms").textContent = (meta && meta.ms ? meta.ms + "ms" : "");
+  el.querySelector(".out").textContent = content || "(无输出)";
+}
+
+/* ── 发送 ────────────────────────────────────────────────────────────── */
+async function send(text){
+  if (S.busy || !text.trim()) return;
+  S.busy = true;
+  $("btn-send").disabled = true; $("btn-stop").disabled = false;
+  addUser(text);
+  setFoot("推理中…");
+  S.usage = {pt:0, ct:0}; $("foot-usage").textContent = "";
+
+  const ctrl = new AbortController(); S.ctrl = ctrl;
+  let cur = null, thinkEl = null, tools = [];
+  const t0 = performance.now();
+
+  try{
+    const res = await fetch("/api/chat", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({session_id: S.session, text, max_steps: S.steps}),
+      signal: ctrl.signal,
+    });
+    if (!res.ok){
+      const msg = await res.text();
+      throw new Error(`HTTP ${res.status}: ${msg.slice(0,300)}`);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for(;;){
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const frames = buf.split("\n\n"); buf = frames.pop();
+      for (const f of frames){
+        const line = f.split("\n").find(l => l.startsWith("data: "));
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line.slice(6)); } catch(e){ continue; }
+
+        if (ev.type === "session"){ S.session = ev.session_id; }
+        else if (ev.type === "step"){ addStep(ev.n, ev.max); cur = addAssistant(); thinkEl = null; }
+        else if (ev.type === "thinking"){
+          if (!cur) cur = addAssistant();
+          // 思考单独放一个默认折叠的块：它是透明的证据，但不该淹没答案。
+          if (!thinkEl){
+            thinkEl = document.createElement("details");
+            thinkEl.className = "think";
+            thinkEl.innerHTML = '<summary>思考过程 <span class="tn"></span></summary>' +
+                                '<div class="tb"></div>';
+            cur.tools.appendChild(thinkEl);
+          }
+          const tb = thinkEl.querySelector(".tb");
+          tb.textContent += ev.delta;
+          thinkEl.querySelector(".tn").textContent = `（${tb.textContent.length} 字）`;
+          scroll();
+        }
+        else if (ev.type === "text"){
+          if (!cur) cur = addAssistant();
+          cur.raw += ev.delta;
+          cur.body.innerHTML = render(cur.raw) + '<span class="cursor"></span>';
+          scroll();
+        }
+        else if (ev.type === "tool_call"){
+          if (!cur) cur = addAssistant();
+          const card = toolCard(ev.name, ev.arguments, null);
+          card.dataset.id = ev.id; cur.tools.appendChild(card);
+          tools.push(card); scroll();
+        }
+        else if (ev.type === "tool_result"){
+          const card = tools.find(c => c.dataset.id === ev.id)
+                    || cur && cur.tools.querySelector("details.tool:not([data-done])");
+          if (card){ card.dataset.done = "1";
+            fillTool(card, ev.ok, ev.content, ev.meta); }
+          scroll();
+        }
+        else if (ev.type === "usage" && ev.prompt_tokens !== undefined){
+          S.usage.pt += ev.prompt_tokens || 0; S.usage.ct += ev.completion_tokens || 0;
+          $("foot-usage").textContent = `tokens ↑${S.usage.pt} ↓${S.usage.ct}`;
+        }
+        else if (ev.type === "final"){
+          if (cur){
+            cur.body.innerHTML = render(cur.raw) || "";
+            cur.meta.textContent = `${ev.reason} · ${ev.steps} 步`;
+          }
+        }
+        else if (ev.type === "error"){
+          const n = document.createElement("div");
+          n.className = "note err"; n.textContent = ev.message;
+          transcript.appendChild(n); scroll();
+        }
+        else if (ev.type === "done"){ setFoot(`完成 · ${ev.elapsed_ms}ms`); }
+      }
+    }
+  }catch(e){
+    if (e.name === "AbortError"){
+      const n = document.createElement("div"); n.className = "note";
+      n.textContent = "已停止。"; transcript.appendChild(n);
+    } else {
+      const n = document.createElement("div"); n.className = "note err";
+      n.textContent = "请求失败：" + e.message; transcript.appendChild(n);
+    }
+    setFoot("中断");
+  }finally{
+    S.busy = false; S.ctrl = null;
+    $("btn-send").disabled = false; $("btn-stop").disabled = true;
+    if (cur && !cur.meta.textContent)
+      cur.meta.textContent = ((performance.now()-t0)/1000).toFixed(1)+"s";
+    refreshSessions(); scroll(); $("input").focus();
+  }
+}
+
+/* ── 事件绑定 ────────────────────────────────────────────────────────── */
+const input = $("input");
+function autoGrow(){ input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 190) + "px"; }
+input.addEventListener("input", autoGrow);
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); doSend(); }
+});
+function doSend(){ const t = input.value; input.value = ""; autoGrow(); send(t); }
+
+$("btn-send").onclick = doSend;
+$("btn-stop").onclick = () => { if (S.ctrl) S.ctrl.abort(); };
+$("btn-new").onclick = async () => {
+  const d = await (await fetch("/api/sessions", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify({title:""})})).json();
+  S.session = d.id;
+  transcript.innerHTML = EMPTY_HTML;      // 用启动时留存的副本，不依赖当前 DOM
+  const e = document.getElementById("empty");
+  if (e) e.style.display = "";
+  bindHints(); refreshSessions();
+};
+$("btn-health").onclick = () => refreshHealth().then(refreshSessions);
+$("btn-steps").onclick = () => {
+  S.steps = S.steps >= 16 ? 4 : S.steps + 4;
+  $("btn-steps").textContent = "步骤 ×" + S.steps;
+};
+function bindHints(){
+  document.querySelectorAll(".hints button").forEach(b => b.onclick = () => send(b.dataset.q));
+}
+bindHints();
+refreshHealth(); refreshSessions();
+setInterval(refreshHealth, 20000);
+input.focus();
+</script>
+</body>
+</html>

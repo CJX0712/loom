@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "复制本文件为 servers.json 即可启用。支持 {python} / {root} / {workdir} 占位符，",
+    "所以同一份配置能在任何机器上直接跑，不用改绝对路径。",
+    "Loom 一个字节的 MCP 协议都不自己实现 —— 全部走官方 SDK。"
+  ],
+  "mcpServers": {
+    "system": {
+      "command": "{python}",
+      "args": ["{root}/mcp/system_server.py"],
+      "description": "仓库自带：本机运行状况（内存/磁盘/进程/端口/时间）"
+    },
+
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "{workdir}"],
+      "description": "官方文件系统服务器：更细粒度的读写/移动/搜索",
+      "disabled": true
+    },
+
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "description": "官方抓取服务器：把网页转成适合模型阅读的格式",
+      "disabled": true
+    },
+
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "{workdir}"],
+      "description": "官方 Git 服务器：状态/差异/提交/日志",
+      "disabled": true
+    },
+
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "{workdir}/data.db"],
+      "description": "官方 SQLite 服务器：让模型直接查询数据库",
+      "disabled": true
+    },
+
+    "time": {
+      "command": "uvx",
+      "args": ["mcp-server-time", "--local-timezone", "Asia/Shanghai"],
+      "description": "官方时间服务器：时区换算",
+      "disabled": true
+    }
+  }
+}

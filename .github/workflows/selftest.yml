@@ -1,0 +1,152 @@
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 不变量自检：离线、确定性、不需要任何模型。
+  # 这一组是硬门禁 —— 所有断言都必须在任何平台上稳定复现。
+  selftest:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  python: "3.11" }   # 压 requires-python 声明下界
+          - { os: ubuntu-latest,  python: "3.13" }
+          - { os: windows-latest, python: "3.13" }
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Environment report
+        run: |
+          python -VV
+          pip list
+
+      - name: Run invariant suite
+        run: python -X utf8 -m loom selftest
+
+      - name: List built-in tools
+        run: python -X utf8 -m loom tools
+
+  # MCP 桥接的真实联调：起一个真的 stdio MCP 服务器，把它的工具并进注册表。
+  # 不需要模型，也不需要网络 —— 所以可以放心当门禁。
+  mcp-bridge:
+    name: MCP bridge (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Bridge the bundled MCP server
+        shell: bash
+        run: |
+          set -o pipefail
+          python -X utf8 -m loom mcp | tee mcp.log
+          grep -q "tools=4" mcp.log || { echo "::error::MCP 服务器没并进来"; exit 1; }
+          for t in sys_overview top_processes listening_ports now; do
+            grep -q "$t" mcp.log || { echo "::error::缺少 MCP 工具 $t"; exit 1; }
+          done
+          echo "MCP 桥接正常：4 个工具已并入"
+
+  # 服务能不能真的起来、界面能不能挂载、SSE 帧格式对不对。
+  # 用 /api/health 与静态资源验证，不需要模型（模型那一档交给本地 smoke）。
+  serve:
+    name: HTTP surface (no model)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Boot the server
+        run: |
+          python -X utf8 -m loom serve --port 8790 --log-level warning &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8790/api/health > health.json; then break; fi
+            sleep 1
+          done
+          cat health.json
+
+      - name: Assert health payload
+        run: |
+          python - <<'PY'
+          import json, sys
+          h = json.load(open("health.json", encoding="utf-8"))
+          assert h["config"]["version"], "缺版本号"
+          assert h["tools"] >= 12, f"工具太少: {h['tools']}"
+          assert "builtin" in h["tool_sources"], h["tool_sources"]
+          assert h["mcp"]["configured"] >= 1, "示例 MCP 配置没被读到"
+          assert h["ollama"]["up"] is False or h["ollama"]["up"] is True
+          print("health OK: tools=%s mcp=%s" % (h["tools"], h["mcp"]))
+          PY
+
+      - name: Assert the UI is served
+        run: |
+          curl -sf http://127.0.0.1:8790/ -o index.html
+          grep -q 'id="transcript"' index.html
+          grep -q '/api/chat' index.html
+          test $(wc -c < index.html) -gt 4000
+          echo "界面已挂载"
+
+      - name: Assert tool listing
+        run: |
+          curl -sf http://127.0.0.1:8790/api/tools -o tools.json
+          python - <<'PY'
+          import json
+          t = json.load(open("tools.json", encoding="utf-8"))
+          names = {x["name"] for x in t["tools"]}
+          need = {"fs_read","fs_write","fs_list","fs_grep","shell_run",
+                  "web_fetch","web_search","python_run","memory_save","memory_search"}
+          missing = need - names
+          assert not missing, f"缺工具: {missing}"
+          print(f"工具清单 OK: {len(names)} 个")
+          PY

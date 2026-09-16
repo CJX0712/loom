@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "system": {
+      "command": "{python}",
+      "args": ["{root}/mcp/system_server.py"],
+      "description": "本机运行状况：内存/磁盘/进程/监听端口/时间"
+    }
+  }
+}

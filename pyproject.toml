@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loom-agent"
+version = "0.1.0"
+description = "本地优先、MCP 原生的智能体运行时 —— 把 Ollama、MCP 和 crawl4ai 组装成一个真正会干活的智能体"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["agent", "llm", "mcp", "local-first", "ollama", "offline", "tool-use"]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "mcp>=1.9",
+]
+
+[project.optional-dependencies]
+dev = ["psutil>=5.9"]
+
+[project.scripts]
+loom = "loom.__main__:main"
+
+[tool.setuptools]
+packages = ["loom"]
+
+# ── 代码规范：ruff ──────────────────────────────────────────────────────────
+# 项目自带 lint 标准，不靠「大家自觉」。CI 里也会跑。
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "loom-tmp", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RET", "ARG", "C4", "PIE", "RUF"]
+ignore = [
+    "E501",           # 交给编辑器折行，硬卡 100 列只会逼出难看的拼接
+    # 这是中文项目：全角标点是正常书写，不是「易混字符」。RUF001/2/3 是为
+    # 纯 ASCII 代码库设计的，在这里全是误报。
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 这三个方法必须保持与协议/框架一致的签名，即使暂时用不到某个参数
+"loom/llm.py"     = ["ARG002"]
+"loom/server.py"  = ["ARG001"]
+"mcp/system_server.py" = ["ARG001"]
+
