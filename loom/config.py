@@ -103,6 +103,13 @@ CRAWL4AI_URL = os.environ.get("LOOM_CRAWL4AI_URL", "http://127.0.0.1:11235")
 CRAWL4AI_ENABLED = os.environ.get("LOOM_CRAWL4AI", "1") not in ("0", "false", "no")
 HTTP_TIMEOUT = float(os.environ.get("LOOM_HTTP_TIMEOUT", "30"))
 
+# --- RAG（本地知识库）-------------------------------------------------------
+# 用 Ollama 的嵌入模型做语义检索，零额外依赖（直接打 /api/embed 端点）。
+EMBED_MODEL = os.environ.get("LOOM_EMBED_MODEL", "nomic-embed-text")
+# 文本切块：每块约多少字符，相邻块重叠多少（重叠防止一句话被切在两半）
+RAG_CHUNK_SIZE = int(os.environ.get("LOOM_RAG_CHUNK_SIZE", "800"))
+RAG_CHUNK_OVERLAP = int(os.environ.get("LOOM_RAG_CHUNK_OVERLAP", "150"))
+
 # --- MCP（Model Context Protocol）-------------------------------------------
 MCP_CONFIG = Path(
     os.environ.get("LOOM_MCP_CONFIG", str(ROOT / "mcp" / "servers.json"))
@@ -113,6 +120,7 @@ HOST = os.environ.get("LOOM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LOOM_PORT", "8790"))
 STATE_DIR = Path(os.environ.get("LOOM_STATE", str(ROOT / ".loom"))).resolve()
 DB_PATH = STATE_DIR / "loom.sqlite3"
+RAG_DB_PATH = STATE_DIR / "rag.sqlite3"
 
 # --- 版本 --------------------------------------------------------------------
 __version__ = "0.1.0"
@@ -132,4 +140,7 @@ def describe() -> dict:
         "num_threads": NUM_THREADS,
         "crawl4ai": CRAWL4AI_URL if CRAWL4AI_ENABLED else None,
         "mcp_config": str(MCP_CONFIG),
+        "embed_model": EMBED_MODEL,
+        "rag_chunk_size": RAG_CHUNK_SIZE,
+        "rag_chunk_overlap": RAG_CHUNK_OVERLAP,
     }

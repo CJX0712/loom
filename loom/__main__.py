@@ -122,6 +122,50 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return asyncio.run(go())
 
 
+def cmd_rag(args: argparse.Namespace) -> int:
+    """本地知识库：摄入文件/目录，或在已摄入内容上做语义检索。"""
+    from .rag import OllamaEmbeddings, VectorStore
+    from .tools import SandboxError, safe_path
+
+    async def go() -> int:
+        store = VectorStore(config.RAG_DB_PATH, OllamaEmbeddings())
+        if args.rag_cmd == "ingest":
+            try:
+                p = safe_path(args.path)
+            except SandboxError as exc:
+                print(f"FAIL {exc}", file=sys.stderr)
+                return 2
+            try:
+                res = await store.ingest_path(p, recursive=getattr(args, "recursive", True))
+            except Exception as exc:
+                print(f"FAIL 摄入失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+                return 1
+            if not res.get("ok"):
+                print(f"FAIL {res.get('error', '摄入失败')}", file=sys.stderr)
+                return 1
+            print(f"  ok  摄入 {res['files']} 个文件，生成 {res['count']} 个文本块")
+            print("RAG INGEST OK")
+            return 0
+
+        # search
+        try:
+            hits = await store.search(args.query, int(args.k))
+        except Exception as exc:
+            print(f"FAIL 检索失败（嵌入模型可能未就绪，先 ollama pull {config.EMBED_MODEL}）: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        if not hits:
+            print("  （知识库为空或没有相关内容，先用 rag ingest 摄入文档）")
+            return 0
+        for i, h in enumerate(hits, 1):
+            print(f"  [#{i}] {h['source']}  (相似度 {h['score']})")
+            print("  " + h["text"][:300].replace("\n", "\n  "))
+        print(f"\n  RAG SEARCH OK  ({len(hits)} hits)")
+        return 0
+
+    return asyncio.run(go())
+
+
 def cmd_smoke(_: argparse.Namespace) -> int:
     """端到端：真模型 + 真工具，验证整条链路。"""
     from .llm import LLMError, OllamaBackend
@@ -181,6 +225,17 @@ def build_parser() -> argparse.ArgumentParser:
         .set_defaults(func=cmd_mcp)
     sub.add_parser("smoke", help="端到端冒烟（需要 Ollama + 一个本地模型）") \
         .set_defaults(func=cmd_smoke)
+
+    rag = sub.add_parser("rag", help="本地知识库：摄入 / 检索")
+    rag_sub = rag.add_subparsers(dest="rag_cmd", required=True)
+    ri = rag_sub.add_parser("ingest", help="摄入文件或目录到知识库")
+    ri.add_argument("path", help="文件或目录的相对路径")
+    ri.add_argument("--no-recursive", dest="recursive", action="store_false",
+                    help="目录不递归")
+    rs = rag_sub.add_parser("search", help="在知识库上做语义检索")
+    rs.add_argument("query", help="自然语言问题")
+    rs.add_argument("--k", type=int, default=5, help="返回条数，默认 5")
+    rag.set_defaults(func=cmd_rag)
 
     c = sub.add_parser("chat", help="命令行一轮对话")
     c.add_argument("prompt")

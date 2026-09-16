@@ -9,6 +9,7 @@ Loom 不自己造轮子。它把世上最强的现成开源件组装成一个**�
 | 能力 | 复用的东西 | 为什么是它 |
 |---|---|---|
 | 推理 | **[Ollama](https://ollama.com)** + Qwen3 | 本地模型运行时的行业标准，一条命令换模型，全程不联网 |
+| 嵌入 | **Ollama** + `nomic-embed-text` | 同一个本地运行时，向量检索零 API Key、零额外服务 |
 | 工具 | **[MCP](https://modelcontextprotocol.io)**（官方 SDK） | 事实标准。配一个 JSON 就接入整个生态里现成的服务器 |
 | 抓取 | **[crawl4ai](https://github.com/unclecode/crawl4ai)** | 把网页转成适合模型读的 Markdown，正文提取质量远超正则扒 HTML |
 
@@ -17,16 +18,40 @@ Loom 自己只写两样东西：**协议翻译**（把工具翻译成模型看�
 ![Loom 界面：模型调 shell_run、读结果、给结论，全程流式可见](./docs/ui.png)
 
 ```
-用户 ──▶ Loom 智能体循环 ──▶ Ollama（本地推理）
+用户 ──▶ Loom 智能体循环 ──▶ Ollama（本地推理 + 本地嵌入）
                 │                    ▲
                 │  工具调用            │  观测回灌
                 ▼                    │
         ┌───────────────────────────┴──────┐
         │ 内置工具：fs / shell / web / python │
+        │ RAG 知识库：本地嵌入 + 向量检索      │
         │ MCP 服务器：任意 stdio 服务器       │
         │ 长期记忆：SQLite，跨会话可检索       │
         └───────────────────────────────────┘
 ```
+
+---
+
+## 知识库（RAG）—— 让智能体读得懂你的文件
+
+Loom 内置一个**完全本地**的 RAG 引擎：把工作目录里的文档切块 → 用 Ollama 的
+`nomic-embed-text` 嵌入 → 存进 SQLite → 查询时做余弦检索。零 API Key、零外部服务、
+不联网。
+
+```bash
+# 1) 装嵌入模型（约 270 MB，只需一次）
+ollama pull nomic-embed-text
+
+# 2) 在界面里让模型自己用，或命令行直接摄入 / 检索
+python -m loom rag ingest .            # 把整个工作目录摄入知识库
+python -m loom rag search "如何重启服务"  # 语义检索最相关片段
+```
+
+智能体会自动获得 `rag_ingest` / `rag_search` 两个工具：先摄入文档，再在回答前检索，
+而不是凭记忆瞎编。向量存在 `LOOM_STATE/rag.sqlite3`，同源重复摄入幂等覆盖。
+
+> 性能提示：嵌入是 CPU 上的矩阵运算，`qwen3:4b` 之外的 `nomic-embed-text` 在 16GB 机器上
+> 吞吐约几千段/分钟，足够个人本地知识库。
 
 ---
 
@@ -128,9 +153,10 @@ $ python -m loom selftest
    [PASS] [上下文] 裁剪没有拆散 tool_call 与 tool 响应
    [PASS] [提示词] 第二轮（历史非空）依然注入 system
    [PASS] [MCP] 占位符 {python}/{root} 被展开成绝对可用路径
+   [PASS] [RAG] 检索把相关文档排在最前
    ...
 
-81/81 checks passed
+98/98 checks passed
 ALL GREEN
 ```
 
@@ -205,6 +231,9 @@ Qwen3-4B 一次「列目录 + 一句话总结」会生成 2000+ token 的推理�
 |---|---|---|
 | `LOOM_MODEL` | `qwen3:4b` | 用哪个 Ollama 模型 |
 | `LOOM_OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama 地址 |
+| `LOOM_EMBED_MODEL` | `nomic-embed-text` | 嵌入模型（RAG 检索用） |
+| `LOOM_RAG_CHUNK_SIZE` | `800` | 文本切块大小（字符） |
+| `LOOM_RAG_CHUNK_OVERLAP` | `150` | 相邻块重叠（字符） |
 | `LOOM_WORKDIR` | 启动目录 | **文件沙箱的根**，所有读写被限制在这里 |
 | `LOOM_THINK` | `auto` | 思维链开关。**默认 auto = 不向 Ollama 发这个字段**，原因见下节 —— 这是个反直觉但实测出来的结论 |
 | `LOOM_NUM_THREADS` | 自动（2–4） | 推理线程数。**别跟随核数**，见下节 |
@@ -231,8 +260,9 @@ loom/
 │   ├── loop.py        # 智能体循环 —— 协议不变量的守卫都在这里
 │   ├── mcp.py         # MCP 桥接：官方 SDK + 跨版本字段兼容层
 │   ├── memory.py      # SQLite 会话 / 消息 / 长期记忆
+│   ├── rag.py         # RAG：本地嵌入 + SQLite 向量库（零新依赖）
 │   ├── server.py      # FastAPI + SSE
-│   ├── selftest.py    # 81 条不变量，离线可跑
+│   ├── selftest.py    # 98 条不变量，离线可跑
 │   └── __main__.py    # CLI
 ├── mcp/
 │   ├── system_server.py     # 自带 MCP 服务器（本机运行状况）

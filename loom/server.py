@@ -18,7 +18,8 @@ from .llm import LLMError, OllamaBackend
 from .loop import SYSTEM_PROMPT, run_agent
 from .mcp import MCPHub
 from .memory import Store, register_memory
-from .tools import Registry, build_registry
+from .rag import OllamaEmbeddings, VectorStore, register_rag
+from .tools import Registry, SandboxError, build_registry, safe_path
 
 STATE: dict[str, Any] = {}
 
@@ -54,6 +55,10 @@ async def lifespan(app: FastAPI):
 
     # 长期记忆工具（跨会话）
     register_memory(registry, store)
+    # RAG 知识库（本地嵌入 + 向量检索）
+    rag_store = VectorStore(config.RAG_DB_PATH, OllamaEmbeddings())
+    STATE["rag"] = rag_store
+    register_rag(registry, rag_store)
     # MCP：连不上不影响启动，状态照实汇报
     try:
         STATE["mcp_status"] = await hub.start(registry)
@@ -100,6 +105,11 @@ async def health() -> dict:
         "mcp": hub.summary(),
         "memory_facts": STATE["store"].count_facts(),
         "sessions": len(STATE["store"].list_sessions(limit=1000)),
+        "rag": {
+            "chunks": STATE["rag"].count(),
+            "sources": len(STATE["rag"].sources()),
+            "embed_model": config.EMBED_MODEL,
+        },
         "uptime_s": round(time.time() - STATE["started_at"], 1),
     }
 
@@ -144,6 +154,53 @@ async def get_session(sid: str) -> dict:
 @app.delete("/api/sessions/{sid}")
 async def delete_session(sid: str) -> dict:
     return {"deleted": STATE["store"].delete_session(sid)}
+
+
+# ---------------------------------------------------------------------------
+# RAG 知识库
+# ---------------------------------------------------------------------------
+class RagIngestIn(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    recursive: bool = True
+
+
+class RagSearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    k: int = Field(default=5, ge=1, le=20)
+
+
+@app.post("/api/rag/ingest")
+async def rag_ingest_api(body: RagIngestIn) -> dict:
+    store: VectorStore = STATE["rag"]
+    try:
+        p = safe_path(body.path)
+    except SandboxError as exc:
+        raise HTTPException(400, str(exc))
+    try:
+        res = await store.ingest_path(p)
+    except Exception as exc:
+        raise HTTPException(502, f"摄入失败: {type(exc).__name__}: {exc}")
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "摄入失败"))
+    return {"ok": True, "count": res["count"], "files": res["files"]}
+
+
+@app.post("/api/rag/search")
+async def rag_search_api(body: RagSearchIn) -> dict:
+    store: VectorStore = STATE["rag"]
+    try:
+        hits = await store.search(body.query, int(body.k))
+    except Exception as exc:
+        raise HTTPException(
+            502, f"检索失败（嵌入模型可能未就绪）: {type(exc).__name__}: {exc}"
+        )
+    return {"ok": True, "hits": hits, "count": len(hits)}
+
+
+@app.get("/api/rag/stats")
+async def rag_stats() -> dict:
+    store: VectorStore = STATE["rag"]
+    return {"ok": True, "chunks": store.count(), "sources": store.sources()}
 
 
 @app.post("/api/sessions/{sid}/cancel")

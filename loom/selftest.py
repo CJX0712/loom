@@ -17,6 +17,13 @@ from . import config
 from .llm import ScriptedBackend, _normalise_tool_calls
 from .loop import SYSTEM_PROMPT, run_agent, trim_context
 from .memory import Store, register_memory
+from .rag import (
+    FakeEmbeddings,
+    OllamaEmbeddings,
+    VectorStore,
+    chunk_text,
+    cosine,
+)
 from .tools import (
     Registry,
     SandboxError,
@@ -498,6 +505,72 @@ def run() -> Results:
         add(r, "[请求体] 温度可覆盖且不污染全局",
             build_payload("m", [], temperature=0.1)["options"]["temperature"] == 0.1
             and build_payload("m", [])["options"]["temperature"] == config.TEMPERATURE)
+
+        # --- 17. RAG 知识库（用 FakeEmbeddings，离线、确定性）------------------
+        # 余弦不变量
+        ax, bx, cx = [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+        add(r, "[RAG] 余弦：相同向量 = 1", abs(cosine(ax, bx) - 1.0) < 1e-9)
+        add(r, "[RAG] 余弦：正交向量 = 0", abs(cosine(ax, cx) - 0.0) < 1e-9)
+        add(r, "[RAG] 余弦：零向量安全返回 0（不抛异常）", cosine([], []) == 0.0)
+
+        fe = FakeEmbeddings(dim=64)
+        v_a = asyncio.run(fe.embed(["猫咪 喜欢 鱼"]))[0]
+        v_b = asyncio.run(fe.embed(["猫咪 喜欢 鱼"]))[0]
+        add(r, "[RAG] FakeEmbeddings 相同文本确定性一致", v_a == v_b)
+        rel_q = asyncio.run(fe.embed(["猫咪"]))[0]
+        cat_vec = asyncio.run(fe.embed(["猫咪 喜欢 吃 鱼 和 老鼠 宠物"]))[0]
+        py_vec = asyncio.run(fe.embed(["python 编程 语言 函数 类"]))[0]
+        add(r, "[RAG] FakeEmbeddings 相关 > 无关（余弦单调）",
+            cosine(rel_q, cat_vec) > cosine(rel_q, py_vec),
+            f"{cosine(rel_q, cat_vec):.3f} vs {cosine(rel_q, py_vec):.3f}")
+
+        # 切块不变量
+        short = "一句短话。另一句短话。".join([""] * 6).strip("。") + "。"
+        short_chunks = chunk_text(short, size=800, overlap=150)
+        add(r, "[RAG] 切块：非空输入必有内容",
+            len(short_chunks) >= 1 and all(c.strip() for c in short_chunks))
+        add(r, "[RAG] 切块：短文本单块且不超过 size",
+            len(short_chunks) == 1 and len(short_chunks[0]) <= 800,
+            f"{len(short_chunks)} 块 / {len(short_chunks[0]) if short_chunks else 0} 字符")
+        long_text = "\n\n".join(
+            f"这是第 {i} 段关于猫咪的内容，猫喜欢睡觉和吃鱼，也爱抓沙发。"
+            for i in range(40)
+        )
+        long_chunks = chunk_text(long_text, size=200, overlap=50)
+        add(r, "[RAG] 切块：长文本切成多块", len(long_chunks) >= 2,
+            f"{len(long_chunks)} 块")
+        add(r, "[RAG] 切块：每块长度不超过 size（含长句容差）",
+            all(len(c) <= 200 + 200 for c in long_chunks),
+            f"最长 {max(len(c) for c in long_chunks)}")
+        # 内容覆盖：块的字符并集长度应接近原文本（重叠保证不丢）
+        add(r, "[RAG] 切块：内容覆盖（块并集近似原文本，≥90%）",
+            len("".join(long_chunks)) >= int(len(long_text.strip()) * 0.9),
+            f"块总长 {len(''.join(long_chunks))} vs 原 {len(long_text.strip())}")
+
+        # VectorStore 检索（FakeEmbeddings，离线）
+        vs = VectorStore(tmp / "rag.sqlite3", FakeEmbeddings(dim=64))
+        n_cat = asyncio.run(vs.ingest_text("cat.txt", "猫咪 喜欢 吃 鱼 和 老鼠 宠物"))
+        n_py = asyncio.run(vs.ingest_text("py.txt", "python 是 编程 语言 支持 函数 和 类 对象"))
+        add(r, "[RAG] 摄入后计数正确", vs.count() == n_cat + n_py,
+            f"{vs.count()} vs {n_cat + n_py}")
+        hits = asyncio.run(vs.search("猫咪 宠物", k=3))
+        add(r, "[RAG] 检索把相关文档排在最前",
+            bool(hits) and "cat.txt" in hits[0]["source"],
+            str([h["source"] for h in hits]))
+        add(r, "[RAG] 检索返回带相似度分数（0,1]",
+            bool(hits) and 0.0 < hits[0]["score"] <= 1.0, str(hits[0] if hits else None))
+        n_cat2 = asyncio.run(vs.ingest_text("cat.txt", "猫咪 喜欢 睡觉 抓 沙发 窗帘"))
+        add(r, "[RAG] 同源重新摄入幂等覆盖（不翻倍）",
+            vs.count() == n_cat2 + n_py, f"{vs.count()} vs {n_cat2 + n_py}")
+        add(r, "[RAG] 空查询返回空列表不报错", asyncio.run(vs.search("")) == [])
+        vs.clear()
+        add(r, "[RAG] clear 后库为空", vs.count() == 0)
+        vs.close()
+
+        # OllamaEmbeddings 构造不触网；真实端点形状由冒烟单独验证
+        oe = OllamaEmbeddings()
+        add(r, "[RAG] OllamaEmbeddings 默认用配置里的嵌入模型",
+            oe.model == config.EMBED_MODEL and oe.host == config.OLLAMA_HOST.rstrip("/"))
 
     finally:
         config.WORKDIR = original_workdir

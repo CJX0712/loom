@@ -2,6 +2,7 @@
 .loom/
 *.sqlite3
 .loom-tmp/
+*.log
 
 # Python
 __pycache__/
