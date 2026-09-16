@@ -111,6 +111,12 @@ RAG_CHUNK_SIZE = int(os.environ.get("LOOM_RAG_CHUNK_SIZE", "800"))
 RAG_CHUNK_OVERLAP = int(os.environ.get("LOOM_RAG_CHUNK_OVERLAP", "150"))
 # 语义记忆召回条数（长期记忆用 embedding 找回含义相近的事实）
 MEMORY_RECALL_K = int(os.environ.get("LOOM_MEMORY_RECALL_K", "8"))
+# 子智能体（agent_delegate 派出的 worker）最多几轮工具往返。
+# 比主循环更紧：worker 不该跑太久，且多个 worker 并行时别把 CPU 抢光。
+DELEGATE_MAX_STEPS = int(os.environ.get("LOOM_DELEGATE_MAX_STEPS", "8"))
+# agent_delegate 自身允许的墙钟超时（秒）。它要跑完一整轮子智能体循环
+# （含模型加载 + 多轮工具往返），远长于普通单工具，故单独放宽。
+DELEGATE_TIMEOUT = float(os.environ.get("LOOM_DELEGATE_TIMEOUT", "300"))
 
 # --- MCP（Model Context Protocol）-------------------------------------------
 MCP_CONFIG = Path(
@@ -146,4 +152,6 @@ def describe() -> dict:
         "rag_chunk_size": RAG_CHUNK_SIZE,
         "rag_chunk_overlap": RAG_CHUNK_OVERLAP,
         "memory_recall_k": MEMORY_RECALL_K,
+        "delegate_max_steps": DELEGATE_MAX_STEPS,
+        "delegate_timeout": DELEGATE_TIMEOUT,
     }

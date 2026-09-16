@@ -123,6 +123,9 @@ class Tool:
     dangerous: bool = False
     source: str = "builtin"
     tags: list[str] = field(default_factory=list)
+    # 每工具墙钟超时覆盖（秒）。None 表示用全局 TOOL_TIMEOUT。
+    # 例：agent_delegate 要跑完整子循环，单独放宽到 DELEGATE_TIMEOUT。
+    timeout: float | None = None
 
     def schema(self) -> dict:
         """OpenAI / Ollama 通用的 function 描述。"""
@@ -188,7 +191,8 @@ class Registry:
         t0 = time.perf_counter()
         try:
             result = await asyncio.wait_for(
-                tool.handler(**arguments), timeout=config.TOOL_TIMEOUT
+                tool.handler(**arguments),
+                timeout=tool.timeout if tool.timeout is not None else config.TOOL_TIMEOUT,
             )
         except TimeoutError:
             return fail(f"工具 {name} 超时（>{config.TOOL_TIMEOUT:g}s）", kind="timeout")

@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import config
+from .delegate import register_delegate
 from .llm import LLMError, OllamaBackend
 from .loop import SYSTEM_PROMPT, run_agent
 from .mcp import MCPHub
@@ -56,6 +57,8 @@ async def lifespan(app: FastAPI):
 
     # 长期记忆工具（跨会话）
     register_memory(registry, store)
+    # 多智能体编排：agent_delegate（子代理复用全集工具，但剪除自身防递归）
+    register_delegate(registry, backend)
     # RAG 知识库（本地嵌入 + 向量检索）
     rag_store = VectorStore(config.RAG_DB_PATH, OllamaEmbeddings())
     STATE["rag"] = rag_store

@@ -12,6 +12,7 @@ Loom 不自己造轮子。它把世上最强的现成开源件组装成一个**�
 | 嵌入 | **Ollama** + `nomic-embed-text` | 同一个本地运行时，向量检索零 API Key、零额外服务 |
 | 工具 | **[MCP](https://modelcontextprotocol.io)**（官方 SDK） | 事实标准。配一个 JSON 就接入整个生态里现成的服务器 |
 | 抓取 | **[crawl4ai](https://github.com/unclecode/crawl4ai)** | 把网页转成适合模型读的 Markdown，正文提取质量远超正则扒 HTML |
+| 编排 | **多智能体（orchestrator-worker）** | 主代理用 `agent_delegate` 派专职子代理，复用 Anthropic 验证过的范式，零新框架 |
 
 Loom 自己只写两样东西：**协议翻译**（把工具翻译成模型看得懂的 schema，把结果翻译回结构化观测）和**产品体验**。算法一行没碰。
 
@@ -27,6 +28,7 @@ Loom 自己只写两样东西：**协议翻译**（把工具翻译成模型看�
         │ RAG 知识库：本地嵌入 + 向量检索      │
         │ MCP 服务器：任意 stdio 服务器       │
         │ 长期记忆：SQLite，跨会话可检索       │
+        │ 多智能体：agent_delegate 派子代理    │
         └───────────────────────────────────┘
 ```
 
@@ -72,6 +74,28 @@ memory_search "React"                                 # 关键词精确检索（
 - 嵌入失败（如模型没拉）时**优雅降级**：事实照样记下来，只是暂时不能被语义召回，绝不丢数据。
 - 未配置嵌入后端时 `memory_recall` 会明确报错、不崩溃。
 - 记忆存在 `LOOM_STATE/loom.sqlite3`，跨会话持久。
+
+---
+
+## 多智能体编排（orchestrator-worker）
+
+遇到能拆成独立块、且可以用工具查证的工作，主智能体用 `agent_delegate` 派一个**专职子智能体**去做，再把它的结论综合进来。这是 Anthropic 在《Effective Multi-Agent Orchestration》里验证过的范式，Loom 直接复用、零新框架。
+
+```bash
+# 智能体在对话中自动用（无需你手动）：
+agent_delegate "查 2024 年全球光伏新增装机量并给出数字"   role=research
+agent_delegate "用 python 算 1..1000 里所有素数之和"       role=executor
+agent_delegate "审查这段 SQL 有没有注入风险"               role=reviewer
+```
+
+设计要点（为什么不会跑飞）：
+
+- **子代理复用主机的同一套工具**（fs / shell / web / python / 记忆 / RAG / MCP），但**自动剪除 `agent_delegate` 本身**——否则子代理会再派子代理，递归失控、上下文爆炸、CPU 被小模型们瓜分。
+- 每个子代理是**独立、无状态**的一轮 `run_agent`：自己的消息列表、按角色（`research`/`executor`/`reviewer`/`planner`）裁剪的 system 提示词，跑到底拿到结论就返回，不污染主会话的 transcript。
+- 资源有硬上限：`LOOM_DELEGATE_MAX_STEPS`（默认 8，比主循环的 12 更紧），worker 不该跑太久。
+- 子代理的任何异常都变成结构化失败回传主循环，主代理据此自救，**不中断**。
+
+> 适用边界：单台 CPU 机器上跑多个并行小模型并不划算（解码卡内存带宽）。`agent_delegate` 当前是**串行**派发——一个子任务做完再综合。需要真正并行 multi-agent 时，加 GPU 或换更大的机器再开并发。
 
 ---
 

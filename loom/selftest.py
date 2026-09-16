@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from . import config
+from .delegate import build_sub_prompt, register_delegate, scoped_registry
 from .llm import ScriptedBackend, _normalise_tool_calls
 from .loop import SYSTEM_PROMPT, run_agent, trim_context
 from .memory import Store, register_memory
@@ -547,7 +548,72 @@ def run() -> Results:
             build_payload("m", [], temperature=0.1)["options"]["temperature"] == 0.1
             and build_payload("m", [])["options"]["temperature"] == config.TEMPERATURE)
 
-        # --- 17. RAG 知识库（用 FakeEmbeddings，离线、确定性）------------------
+        # --- 17b. 多智能体编排（离线、确定性，ScriptedBackend 回放）-----------
+        # 子代理注册表必须剔除 agent_delegate 本身，否则会递归委派失控。
+        live = build_registry()
+        register_delegate(live, ScriptedBackend([{"text": "x"}]))
+        add(r, "[编排] agent_delegate 已注册进主表", live.get("agent_delegate") is not None)
+        sub = scoped_registry(live)
+        add(r, "[编排] 子代理注册表保留全部其它工具",
+            "agent_delegate" not in sub.names()
+            and set(sub.names()) == {n for n in live.names() if n != "agent_delegate"},
+            f"缺: {set(live.names()) - set(sub.names())}")
+        add(r, "[编排] 子代理无法再委派（防递归爆炸）",
+            sub.get("agent_delegate") is None)
+        # agent_delegate 跑完整子循环，必须单独放宽超时，不能用普通单工具的 60s。
+        add(r, "[编排] agent_delegate 有单独放宽的工具超时（非全局 TOOL_TIMEOUT）",
+            live.get("agent_delegate").timeout == config.DELEGATE_TIMEOUT
+            and config.DELEGATE_TIMEOUT > config.TOOL_TIMEOUT,
+            f"delegate={config.DELEGATE_TIMEOUT} vs tool={config.TOOL_TIMEOUT}")
+
+        # 子提示词必须包含任务与角色，且声明「不可再委派」
+        sp = build_sub_prompt("research", "查 2024 年光伏装机量")
+        add(r, "[编排] 子提示词嵌入了任务原文", "2024 年光伏装机量" in sp, sp[:40])
+        add(r, "[编排] 子提示词带角色预设（research）", "信息搜集" in sp, sp[:40])
+        add(r, "[编排] 子提示词明令禁止再委派", "不能" in sp and "派生子智能体" in sp)
+
+        # 端到端：主代理通过 agent_delegate 派一个 worker，worker 用 ScriptedBackend
+        # 跑完一轮拿到结论，工具把结论作为结果返回。
+        del_backend = ScriptedBackend([{"text": "子代理查到的结论：答案=42"}])
+        delegate_reg = build_registry()
+        register_delegate(delegate_reg, del_backend)
+        async def delegate_e2e() -> Results:
+            out: Results = []
+            # 子代理会走 run_agent，调用 scoped_registry（无 agent_delegate），
+            # 这里 ScriptedBackend 只回一个纯文本结论、不调工具，验证返回链路。
+            res = await delegate_reg.dispatch(
+                "agent_delegate", {"task": "算 6*7", "role": "executor"})
+            add(out, "[编排] 委派返回一个结构化结果", res["ok"] and res["meta"].get("kind") == "delegate",
+                str(res.get("meta")))
+            add(out, "[编排] 子代理的结论被原样拿回",
+                "答案=42" in res["content"], res.get("content", "")[:90])
+            add(out, "[编排] 结果带走了角色与步数元信息",
+                res["meta"].get("role") == "executor" and "steps" in res["meta"],
+                str(res["meta"]))
+            # 空任务被拒
+            empty = await delegate_reg.dispatch("agent_delegate", {"task": "   "})
+            add(out, "[编排] 空任务被拒", not empty["ok"])
+            return out
+        r.extend(asyncio.run(delegate_e2e()))
+
+        # 子代理真用工具：ScriptedBackend 先要一个 fs_list，再给结论。
+        # 验证 scoped_registry 里的工具确实能被 run_agent 调度、结果回灌、最终归并。
+        tool_backend = ScriptedBackend([
+            {"text": "我先列目录。", "calls": [{"name": "fs_list", "arguments": {"path": "."}}]},
+            {"text": "目录已列出，子任务完成。"},
+        ])
+        tool_reg = build_registry()
+        register_delegate(tool_reg, tool_backend)
+        async def delegate_tool() -> Results:
+            out: Results = []
+            res = await tool_reg.dispatch(
+                "agent_delegate", {"task": "列出当前目录", "role": "executor"})
+            add(out, "[编排] 子代理能真正调用工具并产出结论",
+                res["ok"] and "子任务完成" in res["content"], res.get("content", "")[:90])
+            return out
+        r.extend(asyncio.run(delegate_tool()))
+
+        # --- 17c. RAG 知识库（用 FakeEmbeddings，离线、确定性）------------------
         # 余弦不变量
         ax, bx, cx = [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
         add(r, "[RAG] 余弦：相同向量 = 1", abs(cosine(ax, bx) - 1.0) < 1e-9)
