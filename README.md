@@ -27,7 +27,7 @@ Loom 自己只写两样东西：**协议翻译**（把工具翻译成模型看�
         │ 内置工具：fs / shell / web / python │
         │ RAG 知识库：本地嵌入 + 向量检索      │
         │ MCP 服务器：任意 stdio 服务器       │
-        │ 长期记忆：SQLite，跨会话可检索       │
+        │ 长期记忆：SQLite 语义召回 + 结束自动沉淀 │
         │ 多智能体：agent_delegate 派子代理    │
         └───────────────────────────────────┘
 ```
@@ -74,6 +74,50 @@ memory_search "React"                                 # 关键词精确检索（
 - 嵌入失败（如模型没拉）时**优雅降级**：事实照样记下来，只是暂时不能被语义召回，绝不丢数据。
 - 未配置嵌入后端时 `memory_recall` 会明确报错、不崩溃。
 - 记忆存在 `LOOM_STATE/loom.sqlite3`，跨会话持久。
+
+---
+
+## 记忆自动沉淀（consolidation）—— 越用越懂你
+
+手动 `memory_save` 有个硬伤：**得有人去调它。** 对话里藏着大量值得长期记住的东西
+（偏好、结论、约定），但模型不会主动写，用户更不会。
+
+Loom 的做法是**对话结束后自动蒸馏**：一轮聊完，后台拿最近若干条消息问一次模型
+"这段对话里有哪些值得长期记住的事实"，让它只回一个 JSON 数组，再把每条事实
+**去重后**连向量一起写进 `facts` 表。这就是 MemGPT / Letta 的 consolidation，
+本地化、零额外依赖。
+
+```text
+一轮对话结束
+   └─▶ 后台 consolidation（fire-and-forget，失败静默）
+         ├─ 取最近 N 条 user/assistant/tool 文本
+         ├─ 问模型 → 稳健解析 JSON 事实数组
+         │     （容忍代码块围栏、前后废话；整段不是 JSON 就按行兜底拆）
+         ├─ 与已有事实做 token 重叠去重（同对话二次沉淀 → saved=0，幂等）
+         └─ 逐条嵌入 + 落库 → 之后可被 memory_recall 语义召回
+```
+
+- **默认开启，且带三重兜底**：`LOOM_MEMORY_CONSOLIDATE=0` 可整体关掉；沉淀跑在后台，
+  任何异常都被吞掉写 stderr，**绝不拖慢或打断主对话**；嵌入失败只降级为关键词记忆，事实照样存。
+- **去重是刚需**：否则同一会话反复沉淀会把 `facts` 表刷爆。
+- 手动触发：`POST /api/memory/consolidate {"session_id": "..."}`（自动沉淀之外的按需入口）。
+- `/api/health` 的 `memory_consolidate` 字段会告诉你它开着没有。
+
+> 代价是每轮对话**多一次推理**（在结束后、不阻塞回复）。换来的是智能体真的记得住
+> "团队用 React + TypeScript、禁止 any" 这类东西，下次开场就用得上 ——
+> 这是「有记忆」和「装作有记忆」的分界线。
+
+CPU 上的三条「省钱 / 防雪崩」设计（都是实测踩出来的）：
+
+1. **太短的对话不蒸馏**（`LOOM_MEMORY_CONSOLIDATE_MIN_CHARS`）。一句"收到"不值得烧一次推理。
+2. **同一时刻只允许一个沉淀在跑。** CPU 上并发跑多个小模型只会互相抢内存带宽，
+   对话密集时请求会堆成雪崩 —— 前一次还没跑完后一次又来了。忙的时候宁可跳过这一轮，下次再补。
+3. **可以指定更便宜的沉淀模型**（`LOOM_CONSOLIDATE_MODEL`）。蒸馏只要一句话结论、
+   不需要思维链，而 Qwen3 无论你怎么要求都会先想一大段。换 `qwen2.5:3b-instruct`
+   这类**本来就不思考**的模型，比在思考模型上想办法省 token 有效得多。
+
+> 别指望用 `think: false` 给沉淀提速 —— 见性能一节，它一个 token 都不省，
+> 只是把推理从 `thinking` 字段倒进正文。
 
 ---
 
@@ -200,7 +244,7 @@ $ python -m loom selftest
    [PASS] [RAG] 检索把相关文档排在最前
    ...
 
-98/98 checks passed
+120/120 checks passed
 ALL GREEN
 ```
 
@@ -278,6 +322,14 @@ Qwen3-4B 一次「列目录 + 一句话总结」会生成 2000+ token 的推理�
 | `LOOM_EMBED_MODEL` | `nomic-embed-text` | 嵌入模型（RAG 检索用） |
 | `LOOM_RAG_CHUNK_SIZE` | `800` | 文本切块大小（字符） |
 | `LOOM_RAG_CHUNK_OVERLAP` | `150` | 相邻块重叠（字符） |
+| `LOOM_MEMORY_RECALL_K` | `8` | 语义召回返回几条事实 |
+| `LOOM_MEMORY_CONSOLIDATE` | `1` | 对话结束自动蒸馏长期记忆；设 `0` 关闭 |
+| `LOOM_MEMORY_CONSOLIDATE_MAX` | `6` | 单轮最多沉淀几条事实（防刷表） |
+| `LOOM_MEMORY_CONSOLIDATE_WINDOW` | `24` | 蒸馏时看最近多少条消息 |
+| `LOOM_MEMORY_CONSOLIDATE_MIN_CHARS` | `40` | 对话窗口短于此就不蒸馏（省一次推理） |
+| `LOOM_CONSOLIDATE_MODEL` | 空（跟主模型） | 沉淀专用模型。**CPU 上强烈建议换成不思考的小模型**（如 `qwen2.5:3b-instruct`），理由见下 |
+| `LOOM_CONSOLIDATE_MAX_TOKENS` | `3072` | 沉淀生成上限。**别调太小**：思考型模型的思维链与正文共用预算，实测设 400/1024 时正文直接为空 |
+| `LOOM_CONSOLIDATE_TIMEOUT` | `900` | 沉淀墙钟超时（秒），超时就放弃本轮 |
 | `LOOM_WORKDIR` | 启动目录 | **文件沙箱的根**，所有读写被限制在这里 |
 | `LOOM_THINK` | `auto` | 思维链开关。**默认 auto = 不向 Ollama 发这个字段**，原因见下节 —— 这是个反直觉但实测出来的结论 |
 | `LOOM_NUM_THREADS` | 自动（2–4） | 推理线程数。**别跟随核数**，见下节 |
@@ -303,10 +355,10 @@ loom/
 │   ├── tools.py       # 工具注册表、10 个内置工具、文件沙箱、命令闸门
 │   ├── loop.py        # 智能体循环 —— 协议不变量的守卫都在这里
 │   ├── mcp.py         # MCP 桥接：官方 SDK + 跨版本字段兼容层
-│   ├── memory.py      # SQLite 会话 / 消息 / 长期记忆
+│   ├── memory.py      # SQLite 会话 / 消息 / 长期记忆 / 自动沉淀
 │   ├── rag.py         # RAG：本地嵌入 + SQLite 向量库（零新依赖）
 │   ├── server.py      # FastAPI + SSE
-│   ├── selftest.py    # 98 条不变量，离线可跑
+│   ├── selftest.py    # 120 条不变量，离线可跑
 │   └── __main__.py    # CLI
 ├── mcp/
 │   ├── system_server.py     # 自带 MCP 服务器（本机运行状况）
@@ -335,6 +387,11 @@ loom/
 - **CPU 推理慢，而且瓶颈是内存带宽。** 实测 `qwen3:4b` Q4_K_M 在 Ryzen 7 8C/16T 上
   约 **4.5–4.9 tok/s**（4 线程），一次「调工具 → 看结果 → 再回答」的往返约 5–7 分钟。
   没有 GPU 的话这是物理限制，不是实现问题。模型越大越慢，`qwen3:8b` 会明显更吃力。
+- **记忆沉淀在 CPU + 思考型模型上要 10 分钟量级。** `qwen3:4b` 一次简单推理就有
+  2000+ token，按 4.5 tok/s 算光"想"就要七八分钟；而且思维链与正文共用
+  `num_predict` 预算 —— 给小了（实测 400 / 1024）正文会直接为空、一条都提不出来。
+  沉淀跑在后台、同时只允许一个、可整体关闭，所以不会拖慢对话本身。
+  想让它降到秒级：`ollama pull qwen2.5:3b-instruct` 并设 `LOOM_CONSOLIDATE_MODEL`。
 - **`think: false` 不是提速开关**，见性能一节 —— 它只是破坏推理与答案的分流。
 - **`web_search` 走 DuckDuckGo 的免 Key 端点**，可能被限流。失败时会明确告诉模型改用
   `web_fetch`，不会静默返回空结果。

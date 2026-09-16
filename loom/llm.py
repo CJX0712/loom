@@ -66,22 +66,30 @@ def build_payload(
     *,
     temperature: float | None = None,
     think: bool | None = None,
+    num_predict: int | None = None,
 ) -> dict:
     """构造发给 Ollama `/api/chat` 的请求体。
 
     单独抽出来是为了能被自检直接断言 —— 尤其是 `think` 的处理规则：
     **只有显式给 True/False 时才带这个字段，None 表示完全不提**，让 Ollama
     按模型自己的模板决定。见 config.THINK 那段注释里为什么默认不提。
+
+    `num_predict` 同理只在显式给出时才带。**它很重要**：不给的话小模型会一直
+    生成到上下文上限（qwen3:4b 是 4 万 token，按 4 tok/s 算就是几小时）。
+    像"沉淀"这种只要一句 JSON 的批处理任务，必须自己封顶。
     """
+    options: dict[str, Any] = {
+        "temperature": config.TEMPERATURE if temperature is None else temperature,
+        # 显式锁线程数。跟随核数会让小模型解码慢近一倍（见 config.auto_threads）。
+        "num_thread": config.NUM_THREADS,
+    }
+    if num_predict is not None:
+        options["num_predict"] = int(num_predict)
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "stream": True,
-        "options": {
-            "temperature": config.TEMPERATURE if temperature is None else temperature,
-            # 显式锁线程数。跟随核数会让小模型解码慢近一倍（见 config.auto_threads）。
-            "num_thread": config.NUM_THREADS,
-        },
+        "options": options,
     }
     if tools:
         payload["tools"] = tools
@@ -144,6 +152,7 @@ class OllamaBackend:
         model: str | None = None,
         temperature: float | None = None,
         think: bool | None = None,
+        num_predict: int | None = None,
     ) -> AsyncIterator[dict]:
         """流式对话。产出的事件类型：
 
@@ -154,7 +163,7 @@ class OllamaBackend:
         """
         payload = build_payload(
             model or config.DEFAULT_MODEL, messages, tools,
-            temperature=temperature, think=think,
+            temperature=temperature, think=think, num_predict=num_predict,
         )
 
         acc: dict[int, dict] = {}

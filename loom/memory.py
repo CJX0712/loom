@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from .llm import ChatBackend
 from .rag import EmbeddingBackend, cosine
 from .tools import Registry, Tool, fail, ok
 
@@ -300,4 +302,154 @@ def register_memory(reg: Registry, store: Store, session_id: str | None = None,
             reg.register(t)
 
 
-__all__ = ["Any", "Store", "memory_tools", "register_memory"]
+# ---------------------------------------------------------------------------
+# 记忆自动沉淀（MemGPT 式 consolidation）
+# ---------------------------------------------------------------------------
+# 提示词刻意写得很"机械"：蒸馏是抽取任务，不需要模型自我辩论。
+# 限制条数与字数是在省 CPU —— 思考型模型会为"哪条值得记"纠结很久，
+# 而这段纠结的每一个 token 都是真金白银的解码时间。
+CONSOLIDATE_SYSTEM = (
+    "你是记忆整理器。阅读对话，抽出值得长期记住的事实：稳定偏好、明确结论、"
+    "关键决策、项目约定。\n"
+    "规则：\n"
+    "1) 每条一句话，不超过 30 字，独立可读\n"
+    "2) 最多 3 条；没有值得记的就输出 []\n"
+    "3) 不要解释、不要复述对话，直接输出 JSON 数组\n"
+    "示例：[\"用户是前端工程师，主用 React\", \"项目禁止在提交里写 any\"]"
+)
+
+
+async def _complete(backend: ChatBackend, messages: list[dict],
+                    model: str | None = None,
+                    num_predict: int | None = None,
+                    temperature: float | None = None) -> str:
+    """把一次（无工具）对话跑完，拼接出完整正文。
+
+    `num_predict` 用来给生成长度封顶 —— 批处理任务（如沉淀）必须封，
+    否则思考型模型会一路生成到上下文上限。
+    """
+    parts: list[str] = []
+    async for ev in backend.chat_stream(messages, tools=None, model=model,
+                                        num_predict=num_predict,
+                                        temperature=temperature):
+        if ev["type"] == "text":
+            parts.append(ev["text"])
+    return "".join(parts)
+
+
+def _recent_text(messages: list[dict], n: int) -> str:
+    """取最近 n 条 user/assistant/tool 消息的纯文本，tool 消息解包内层 content。"""
+    picked: list[str] = []
+    for m in reversed(messages):
+        role = m.get("role")
+        if role not in ("user", "assistant", "tool"):
+            continue
+        content = m.get("content", "")
+        if isinstance(content, str):
+            text = content
+        else:
+            text = json.dumps(content, ensure_ascii=False)
+        if role == "tool":
+            # tool 的 content 形如 {"ok":..., "content":"..."} —— 取内层可读内容
+            try:
+                text = str(json.loads(content).get("content", "") or "")
+            except Exception:
+                text = str(content)
+        if text.strip():
+            picked.append(f"{role}: {text.strip()}")
+        if len(picked) >= n:
+            break
+    return "\n\n".join(reversed(picked))
+
+
+def _parse_facts(raw: str) -> list[str]:
+    """从模型输出里稳健解析出事实字符串列表。
+
+    容忍 ```json 围栏、前后废话、以及整段都不是 JSON 时按行兜底。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    fence = re.search(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)
+    if fence:
+        raw = fence.group(1).strip()
+    i, j = raw.find("["), raw.rfind("]")
+    if i >= 0 and j > i:
+        try:
+            arr = json.loads(raw[i : j + 1])
+        except json.JSONDecodeError:
+            arr = None
+        if isinstance(arr, list):
+            return [str(x).strip() for x in arr if str(x).strip()]
+    # 兜底：按非空短行拆
+    return [ln.strip(" -。，、").strip() for ln in raw.splitlines()
+            if ln.strip() and len(ln.strip()) > 2]
+
+
+async def consolidate_memory(
+    backend: ChatBackend,
+    store: Store,
+    messages: list[dict],
+    *,
+    backend_embed: EmbeddingBackend | None = None,
+    session_id: str | None = None,
+    model: str | None = None,
+    max_facts: int | None = None,
+) -> dict:
+    """对话结束后，用 LLM 把值得长期记住的事实蒸馏进 facts 表。
+
+    - 只看最近 N 条消息（user/assistant/tool 的文本内容）
+    - 让模型只输出 JSON 数组（每个元素是一句话事实）
+    - 与已有事实做阈值去重，避免反复记同一条
+    - 嵌入失败也不耽误落库（降级为纯关键词记忆）
+    """
+    max_facts = max_facts or config.MEMORY_CONSOLIDATE_MAX
+    window = _recent_text(messages, config.MEMORY_CONSOLIDATE_WINDOW)
+    # 太短的对话（比如一句"收到"）不值得花一次推理去蒸馏
+    if len(window) < config.MEMORY_CONSOLIDATE_MIN_CHARS:
+        return {"ok": True, "saved": 0, "skipped": 0, "reason": "too_short"}
+    # 沉淀模型显式指定时优先 —— CPU 上建议换成不思考的小模型，见 config 注释
+    model = config.CONSOLIDATE_MODEL or model
+
+    try:
+        # 双重保险：num_predict 封住生成长度，wait_for 封住墙钟时间。
+        # 前者防"模型一直想"，后者防"慢慢吐 token"（HTTP 读超时救不了后者）。
+        raw = await asyncio.wait_for(
+            _complete(backend, [
+                {"role": "system", "content": CONSOLIDATE_SYSTEM},
+                {"role": "user", "content": window},
+            ], model=model,
+                num_predict=config.CONSOLIDATE_MAX_TOKENS,
+                temperature=config.CONSOLIDATE_TEMPERATURE),
+            timeout=config.CONSOLIDATE_TIMEOUT,
+        )
+    except Exception as exc:  # 含 TimeoutError：超时就放弃这一轮，不占着 CPU
+        return {"ok": False, "saved": 0, "skipped": 0,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    facts = _parse_facts(raw)
+    if not facts:
+        return {"ok": True, "saved": 0, "skipped": 0, "reason": "none"}
+
+    # 去重：拉候选事实的命中项，按 token 重叠比跳过近似项（含同对话二次沉淀的幂等）
+    existing = store.search_facts(" ".join(facts), limit=200)
+    existing_tokens = [_tokens(r["text"]) for r in existing]
+    saved = skipped = 0
+    for f in facts[:max_facts]:
+        ft = _tokens(f)
+        if any(len(ft & et) / max(1, min(len(ft), len(et))) >= 0.9
+               for et in existing_tokens):
+            skipped += 1
+            continue
+        vec = None
+        if backend_embed is not None:
+            try:
+                vec = (await backend_embed.embed([f]))[0]
+            except Exception:
+                vec = None  # 嵌入失败也不耽误记忆，只是这条不能被语义召回
+        store.save_fact(f, tags="auto", session_id=session_id, vec=vec)
+        saved += 1
+    return {"ok": True, "saved": saved, "skipped": skipped}
+
+
+__all__ = ["Any", "Store", "memory_tools", "register_memory", "consolidate_memory"]

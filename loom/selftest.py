@@ -17,7 +17,7 @@ from . import config
 from .delegate import build_sub_prompt, register_delegate, scoped_registry
 from .llm import ScriptedBackend, _normalise_tool_calls
 from .loop import SYSTEM_PROMPT, run_agent, trim_context
-from .memory import Store, register_memory
+from .memory import Store, consolidate_memory, register_memory
 from .rag import (
     FakeEmbeddings,
     OllamaEmbeddings,
@@ -358,6 +358,55 @@ def run() -> Results:
             return out
         r.extend(asyncio.run(no_backend_checks()))
 
+        # --- 9c. 自动记忆沉淀（MemGPT 式 consolidation，离线确定性）----------
+        cons_emb = FakeEmbeddings(dim=64)
+        cons_store = Store(tmp / "cons.sqlite3")
+        cons_model = ScriptedBackend([{"text": json.dumps([
+            "用户团队用 React + TypeScript",
+            "代码规范禁止写 any",
+            "代码评审重点看类型安全",
+        ], ensure_ascii=False)}])
+        async def consolidate_checks() -> Results:
+            out: Results = []
+            transcript = [
+                {"role": "user", "content": "我司用 React + TypeScript，禁止用 any"},
+                {"role": "assistant", "content": "好的，记下了。"},
+                {"role": "tool", "content": json.dumps({"ok": True, "content": "已执行"})},
+                {"role": "user", "content": "以后代码评审重点看类型安全"},
+            ]
+            res1 = await consolidate_memory(cons_model, cons_store, transcript,
+                                            backend_embed=cons_emb, session_id="cx",
+                                            model="scripted")
+            add(out, "[沉淀] 首轮从对话蒸馏出多条事实",
+                res1["ok"] and res1["saved"] >= 2, str(res1))
+            # 幂等：同样 transcript 再跑一次，应全部跳过（去重生效）
+            res2 = await consolidate_memory(cons_model, cons_store, transcript,
+                                            backend_embed=cons_emb, session_id="cx",
+                                            model="scripted")
+            add(out, "[沉淀] 同对话二次沉淀幂等（去重，saved=0）",
+                res2["ok"] and res2["saved"] == 0, str(res2))
+            # 沉淀的事实可被语义召回（向量已随 save 写入）
+            rec = cons_store.recall_facts(
+                (await cons_emb.embed(["代码 评审 类型 安全"]))[0], k=3)
+            add(out, "[沉淀] 沉淀的事实可被语义召回",
+                bool(rec) and any("类型" in r["text"] for r in rec),
+                str([r["text"] for r in rec]))
+            # 空窗口（仅 system）不写库、不崩
+            res3 = await consolidate_memory(cons_model, cons_store,
+                                            [{"role": "system", "content": "x"}],
+                                            backend_embed=cons_emb)
+            add(out, "[沉淀] 空对话不写库（too_short 安全返回）",
+                res3["ok"] and res3["saved"] == 0 and res3.get("reason") == "too_short",
+                str(res3))
+            return out
+        r.extend(asyncio.run(consolidate_checks()))
+        # 沉淀是后台批处理，必须有硬上限：不封顶的小模型能一路生成几小时。
+        # HTTP 读超时救不了"慢慢吐 token"（每次读都有数据），所以墙钟超时是必需的第二道。
+        add(r, "[沉淀] 生成长度与墙钟时间都有上限（防无限生成）",
+            config.CONSOLIDATE_MAX_TOKENS > 0 and config.CONSOLIDATE_TIMEOUT > 0,
+            f"tokens={config.CONSOLIDATE_MAX_TOKENS} "
+            f"timeout={config.CONSOLIDATE_TIMEOUT}")
+
         # 会话隔离
         a = store.create_session("A")
         b = store.create_session("B")
@@ -547,6 +596,12 @@ def run() -> Results:
         add(r, "[请求体] 温度可覆盖且不污染全局",
             build_payload("m", [], temperature=0.1)["options"]["temperature"] == 0.1
             and build_payload("m", [])["options"]["temperature"] == config.TEMPERATURE)
+        # num_predict 是批处理任务（沉淀）的命根子：不封顶，思考型模型会一直生成到
+        # 上下文上限（几小时）。钉死"默认不带、给了才带"，别让它被顺手去掉。
+        add(r, "[请求体] num_predict 默认不带，显式给才带",
+            "num_predict" not in build_payload("m", [])["options"]
+            and build_payload("m", [], num_predict=400)["options"]["num_predict"] == 400,
+            str(build_payload("m", [])["options"]))
 
         # --- 17b. 多智能体编排（离线、确定性，ScriptedBackend 回放）-----------
         # 子代理注册表必须剔除 agent_delegate 本身，否则会递归委派失控。

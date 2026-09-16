@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from .delegate import register_delegate
 from .llm import LLMError, OllamaBackend
 from .loop import SYSTEM_PROMPT, run_agent
 from .mcp import MCPHub
-from .memory import Store, register_memory
+from .memory import Store, consolidate_memory, register_memory
 from .rag import OllamaEmbeddings, VectorStore, register_rag
 from .tools import Registry, SandboxError, build_registry, safe_path
 
@@ -55,12 +56,14 @@ async def lifespan(app: FastAPI):
         mcp_status=[],
     )
 
-    # 长期记忆工具（跨会话）
-    register_memory(registry, store)
+    # 长期记忆工具（跨会话）。记忆语义召回 + 沉淀共用同一个嵌入后端。
+    embed = OllamaEmbeddings()
+    STATE["embed"] = embed
+    register_memory(registry, store, backend=embed)
     # 多智能体编排：agent_delegate（子代理复用全集工具，但剪除自身防递归）
     register_delegate(registry, backend)
     # RAG 知识库（本地嵌入 + 向量检索）
-    rag_store = VectorStore(config.RAG_DB_PATH, OllamaEmbeddings())
+    rag_store = VectorStore(config.RAG_DB_PATH, embed)
     STATE["rag"] = rag_store
     register_rag(registry, rag_store)
     # MCP：连不上不影响启动，状态照实汇报
@@ -109,6 +112,7 @@ async def health() -> dict:
         "mcp": hub.summary(),
         "memory_facts": STATE["store"].count_facts(),
         "memory_semantic": config.EMBED_MODEL,
+        "memory_consolidate": config.MEMORY_CONSOLIDATE,
         "sessions": len(STATE["store"].list_sessions(limit=1000)),
         "rag": {
             "chunks": STATE["rag"].count(),
@@ -217,6 +221,26 @@ async def cancel_session(sid: str) -> dict:
     return {"cancelled": True}
 
 
+class MemoryConsolidateIn(BaseModel):
+    session_id: str
+
+
+@app.post("/api/memory/consolidate")
+async def memory_consolidate_api(body: MemoryConsolidateIn) -> dict:
+    """手动触发某会话的记忆沉淀（自动沉淀之外的按需入口）。"""
+    store: Store = STATE["store"]
+    if not store.exists(body.session_id):
+        raise HTTPException(404, "会话不存在")
+    messages = build_messages(store.messages(body.session_id))
+    res = await consolidate_memory(
+        STATE["backend"], store, messages,
+        backend_embed=STATE.get("embed"),
+        session_id=body.session_id,
+        model=STATE.get("model"),
+    )
+    return {"ok": True, **res}
+
+
 # ---------------------------------------------------------------------------
 # 聊天（SSE）
 # ---------------------------------------------------------------------------
@@ -239,6 +263,31 @@ def build_messages(history: list[dict]) -> list[dict]:
 
 def sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# 同一时刻只允许一个沉淀在跑。CPU 上并发跑多个小模型只会互相抢内存带宽，
+# 对话密集时还会把推理请求堆成雪崩（前一还没跑完后一又来）—— 忙的时候宁可
+# 跳过这一轮，下次对话再补。
+_CONSOLIDATE_LOCK = asyncio.Lock()
+
+
+async def _consolidate(sid: str, messages: list[dict]) -> None:
+    """对话结束后台沉淀长期记忆。失败静默，不影响主链路。"""
+    if not config.MEMORY_CONSOLIDATE or _CONSOLIDATE_LOCK.locked():
+        return
+    async with _CONSOLIDATE_LOCK:
+        try:
+            res = await consolidate_memory(
+                STATE["backend"], STATE["store"], messages,
+                backend_embed=STATE.get("embed"),
+                session_id=sid,
+                model=STATE.get("model"),
+            )
+            if res.get("saved"):
+                STATE["store"].touch(sid)
+        except Exception as exc:  # 沉淀失败绝不影响主链路，静默记录
+            print(f"[consolidate] 会话 {sid} 沉淀失败: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
 
 
 @app.post("/api/chat")
@@ -293,6 +342,10 @@ async def chat(body: ChatIn, request: Request) -> StreamingResponse:
                 persisted += 1
             STATE["cancel"].pop(sid, None)
             yield sse({"type": "done", "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)})
+
+        # 后台沉淀：对话结束自动蒸馏长期记忆（失败不影响主链路，fire-and-forget）
+        if config.MEMORY_CONSOLIDATE:
+            asyncio.create_task(_consolidate(sid, list(messages)))
 
     return StreamingResponse(
         gen(),
