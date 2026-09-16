@@ -52,6 +52,21 @@ def workdir() -> Path:
     return config.WORKDIR.resolve()
 
 
+def _as_separators(text: str, windows: bool | None = None) -> str:
+    """把反斜杠统一成路径分隔符（仅非 Windows 平台需要）。
+
+    POSIX 里 `\\` 本来只是普通文件名字符，所以 `..\\..\\windows\\win.ini`
+    在 Linux 上会被解析成一个**普通文件名**、老老实实待在沙箱内 —— 语义上没错，
+    但对智能体沙箱来说是个洞：模型按 Windows 习惯吐出来的穿越路径会**静默放行**，
+    而且行为随平台变化（CI 上 Linux 挂、Windows 过，就是这个问题）。
+
+    宁可误拒一个带反斜杠的奇怪文件名，也不能让沙箱语义随平台漂移。
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    return text if windows else text.replace("\\", "/")
+
+
 def safe_path(raw: str) -> Path:
     """把用户/模型给的路径解析到工作目录内，越界即拒绝。
 
@@ -60,7 +75,7 @@ def safe_path(raw: str) -> Path:
     if raw is None or not str(raw).strip():
         raise SandboxError("路径不能为空")
     work = workdir()
-    p = Path(str(raw))
+    p = Path(_as_separators(str(raw)))
     candidate = p.resolve() if p.is_absolute() else (work / p).resolve()
     if candidate != work and work not in candidate.parents:
         raise SandboxError(

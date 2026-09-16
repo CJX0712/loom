@@ -139,6 +139,20 @@ def run() -> Results:
         except SandboxError as exc:
             add(r, "[沙箱] 工作目录内的相对路径正常解析", False, str(exc))
 
+        # 反斜杠穿越必须在**所有平台**都被拦下。
+        # POSIX 里 `\` 只是普通文件名字符，不统一处理的话这条路径会静默放行，
+        # 沙箱语义就随平台漂移了（CI 上表现为 Linux 挂、Windows 过）。
+        from .tools import _as_separators
+
+        # 注意：不能把反斜杠字面量写进 f-string 的表达式里 —— Python 3.11 会直接
+        # 语法报错（3.12 才放开）。所以先算好再拼。
+        probe_bs = ".." + "\\" + ".." + "\\" + "x"
+        posix_probe = _as_separators(probe_bs, windows=False)
+        win_probe = _as_separators(probe_bs, windows=True)
+        add(r, "[沙箱] POSIX 下反斜杠被当作分隔符（跨平台语义一致）",
+            posix_probe == "../../x" and win_probe == probe_bs,
+            f"posix={posix_probe!r} windows={win_probe!r}")
+
         # --- 3. shell 闸门 --------------------------------------------------
         dangerous = [
             "rm -rf /", "mkfs.ext4 /dev/sda1", "shutdown /s /t 0",

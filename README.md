@@ -1,5 +1,7 @@
 # Loom
 
+[![selftest](https://github.com/CJX0712/loom/actions/workflows/selftest.yml/badge.svg)](https://github.com/CJX0712/loom/actions/workflows/selftest.yml)
+
 **本地优先 · MCP 原生 · 零 API Key 的智能体运行时。**
 
 Loom 不自己造轮子。它把世上最强的现成开源件组装成一个**真的会干活**的智能体：
@@ -114,6 +116,7 @@ Loom 一个字节的 MCP 协议都不自己实现，全部走官方 SDK。于是
 4. **工具失败不中断循环。** 断言「先失败后重试」的会话最终能给出答案，且协议完整。
 5. **沙箱必须两边都规范化再比较。** Windows 上 `%TEMP%` 常是短名（`ADMINI~1`），而 `Path.resolve()` 展开成长名 —— 不规范化就会把合法访问误判成越界。
 6. **system 提示词每一轮都要重新注入。** 它属于代码、不属于用户数据，所以不入库；但反过来，绝不能只在会话第一轮注入 —— 否则从第二轮起模型丢了全部行为约束，退化成裸模型。写成 `if not history: history = [system]` 就会踩这个坑。
+7. **反斜杠穿越在所有平台都被拦。** POSIX 里 `\` 只是普通文件名字符，所以 `..\..\windows\win.ini` 在 Linux 上会被当成普通文件名、老实待在沙箱里 —— 语义没错，但对智能体是个洞：模型按 Windows 习惯吐出的穿越路径会**静默放行**，而且行为随平台漂移（同一份代码 Linux 挂、Windows 过就是这么来的）。宁可误拒一个怪文件名，也不让沙箱语义分叉。
 
 ```bash
 $ python -m loom selftest
@@ -127,7 +130,7 @@ $ python -m loom selftest
    [PASS] [MCP] 占位符 {python}/{root} 被展开成绝对可用路径
    ...
 
-80/80 checks passed
+81/81 checks passed
 ALL GREEN
 ```
 
@@ -229,7 +232,7 @@ loom/
 │   ├── mcp.py         # MCP 桥接：官方 SDK + 跨版本字段兼容层
 │   ├── memory.py      # SQLite 会话 / 消息 / 长期记忆
 │   ├── server.py      # FastAPI + SSE
-│   ├── selftest.py    # 80 条不变量，离线可跑
+│   ├── selftest.py    # 81 条不变量，离线可跑
 │   └── __main__.py    # CLI
 ├── mcp/
 │   ├── system_server.py     # 自带 MCP 服务器（本机运行状况）
