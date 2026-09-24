@@ -5,7 +5,7 @@ uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
 # 官方 Model Context Protocol SDK（v1 与 v2 都能跑，见 loom/mcp.py 的字段兼容层）
-mcp>=1.9
+mcp>=2.2.0
 
 # 可选：装了它，system_server 的内存/进程数据更准
 # psutil>=5.9
