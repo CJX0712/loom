@@ -1,5 +1,12 @@
 # Loom
 
+<div align="center">
+
+[![License](https://img.shields.io/badge/License-MIT-green)](https://github.com/CJX0712/loom/blob/main/LICENSE) [![Language](https://img.shields.io/badge/Python-3776AB?logo=python)](https://github.com/CJX0712/loom) [![Author](https://img.shields.io/badge/author-晨星-blueviolet)](https://github.com/CJX0712)
+
+</div>
+
+
 [![selftest](https://github.com/CJX0712/loom/actions/workflows/selftest.yml/badge.svg)](https://github.com/CJX0712/loom/actions/workflows/selftest.yml)
 
 **本地优先 · MCP 原生 · 零 API Key 的智能体运行时。**
